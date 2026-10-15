@@ -6,7 +6,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import train_frozen
-from train_frozen import answer_kl, ece, evaluate
+from train_frozen import Row, RefTopk, answer_kl, ece, evaluate
 from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
 from test_digit_score import IDS
 from test_trie_score import tiny_model
@@ -25,7 +25,8 @@ def test_centred_ece_is_stable_at_levels():
     assert abs(ece(levels, yy) - ece(levels, yy, centred=True)) < 1e-9
 
 
-ROWS = [("a", [11, 12, 13, 14, 15, 16], 1.0, 2), ("b", [21, 22, 23, 24], 0.0, 1), ("c", [31, 32, 33, 34, 35, 36, 37], 1.0, 3)]
+ROWS = [Row("a", [11, 12, 13, 14, 15, 16], 1.0, 2, 0), Row("b", [21, 22, 23, 24], 0.0, 1, 0),
+        Row("a", [31, 32, 33, 34, 35, 36, 37], 1.0, 3, 1)]
 score = lambda m, prefixes, greedy=False, hidden=False: level_logps(m, prefixes, IDS, greedy, hidden)
 
 
@@ -62,6 +63,26 @@ def test_chunked_answer_kl_has_the_same_gradients(monkeypatch):
         return {n: p.grad.clone() for n, p in model.named_parameters() if p.requires_grad}
     whole, chunked = grads(512), grads(2)
     assert all(torch.allclose(whole[n], chunked[n], atol=1e-5) for n in whole)
+
+
+def test_cached_topk_kl(tmp_path):
+    from ref_topk import write_cache
+    kls = {}
+    for k in (64, 4):  # the tiny vocabulary has 64 tokens: k = 64 is the whole distribution
+        with torch.no_grad():
+            write_cache(tiny_model().eval(), ROWS, tmp_path / f"k{k}", k, {})
+        cache = RefTopk(tmp_path / f"k{k}")
+        for init_zero in (True, False):
+            model = lora(init_zero).eval()
+            with torch.no_grad():
+                states = score(model, [r.prefix for r in ROWS], hidden=True)[1]
+                kls[k, init_zero] = answer_kl(model, states, ROWS, cache), answer_kl(model, states, ROWS)
+    cached, live = kls[64, False]
+    assert torch.allclose(cached, live, atol=1e-3), (cached, live)  # fp16 cache, otherwise exact
+    cached, live = kls[4, False]
+    assert (cached <= live + 1e-4).all() and (cached > 0).all()  # coarse-graining never adds KL
+    for k in (64, 4):
+        assert kls[k, True][0].abs().max() < 1e-3  # untrained adapter: zero up to fp16 rounding
 
 
 def test_evaluate_reports_zero_answer_kl_untrained():

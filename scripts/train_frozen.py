@@ -20,8 +20,11 @@ bins centred on the levels (nearest 0.1), because an expected confidence of 0.79
 Answer drift: LoRA acts at every position, so training only the confidence also moves the reasoning and answer
 (rewarding_doubt, sweep 11). answer_kl is KL(current || untrained) over the vocabulary, summed over each row's
 cached completion tokens before the confidence; the untrained model is the same one with the adapter off.
---answer-kl W adds W times it to each row's loss (rewarding_doubt's LoRA setting is W = 1). Dev metrics report
-it per completion and per token on the first --drift-rows rows. The cache freezes the answers, so this is
+--answer-kl W adds W times it to each row's loss (rewarding_doubt's LoRA setting is W = 1). With --ref-topk DIR
+(from ref_topk.py) the training penalty compares against the untrained model's cached top-k log-probs instead
+of a live pass: both distributions coarse-grained to those k tokens plus one bucket for the rest, which is
+never more than the exact KL (rewarding_doubt's topk_answer_kl). Dev metrics always report the exact KL, per
+completion and per token, on the first --drift-rows rows. The cache freezes the answers, so this is
 the only signal that regenerated answers would change.
 
 usage: train_frozen.py --train ROLLOUTS --dev ROLLOUTS [--test ROLLOUTS] --objective exact|sampled
@@ -48,9 +51,13 @@ from logprob_spans import cut_point, make_token_bytes
 # Every linear layer of a Qwen2 block, as "all-linear" selects; peft refuses a string with layers_to_transform.
 LINEAR_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
+# A training row: one cached rollout, cut after "<confidence>". j is the output's index within its question.
+Row = collections.namedtuple("Row", "qid prefix correct start j")
+
 
 def load_rows(path, token_bytes, max_prefix):
-    """Well-formed rollouts as (problem id, prefix token ids, correctness, prompt length); counts what was dropped.
+    """Well-formed rollouts as Rows (problem id, prefix token ids, correctness, prompt length, output index);
+    counts what was dropped.
 
     The prefix is the sampled token ids themselves (prompt_ids + completion_ids), cut through the <confidence>
     tag that opens the final confidence, so training scores exactly the tokens the policy produced.
@@ -58,14 +65,14 @@ def load_rows(path, token_bytes, max_prefix):
     rows, dropped = [], collections.Counter()
     for line in open(path):
         q = json.loads(line)
-        for text, ids, ok, correct in zip(q["outputs"], q["completion_ids"], q["format_ok"], q["correct"]):
+        for j, (text, ids, ok, correct) in enumerate(zip(q["outputs"], q["completion_ids"], q["format_ok"], q["correct"])):
             cut = cut_point(text, ids, "confidence", token_bytes) if ok else None
             if cut is None:
                 dropped["format"] += 1; continue
             prefix = q["prompt_ids"] + ids[:cut]
             if len(prefix) > max_prefix:
                 dropped["long"] += 1; continue
-            rows.append((q["id"], prefix, float(correct), len(q["prompt_ids"])))
+            rows.append(Row(q["id"], prefix, float(correct), len(q["prompt_ids"]), j))
     return rows, dict(dropped)
 
 
@@ -119,21 +126,53 @@ def _chunk_kl(lm_head, h_cur, h_ref):
     return (cur.exp() * (cur - ref)).sum()
 
 
-def answer_kl(model, states, rows):
+def _chunk_kl_topk(lm_head, h_cur, ref_ids, ref_logp):
+    """KL with both distributions coarse-grained to the reference's top-k tokens plus one bucket for the rest."""
+    top = lm_head(h_cur).float().log_softmax(-1).gather(-1, ref_ids)
+    ref = ref_logp.float()
+    rest_cur = torch.log1p(-top.exp().sum(-1).clamp(max=1 - 1e-6))
+    rest_ref = torch.log1p(-ref.exp().sum(-1).clamp(max=1 - 1e-6))
+    return (top.exp() * (top - ref)).sum() + (rest_cur.exp() * (rest_cur - rest_ref)).sum()
+
+
+class RefTopk:
+    """The untrained model's top-k log-probs at every cached completion position (written by ref_topk.py)."""
+
+    def __init__(self, root):
+        self.meta = json.load(open(os.path.join(root, "meta.json")))
+        n, k = self.meta["positions"], self.meta["k"]
+        self.ids = np.memmap(os.path.join(root, "ids.int32"), dtype=np.int32, mode="r", shape=(n, k))
+        self.logp = np.memmap(os.path.join(root, "logp.float16"), dtype=np.float16, mode="r", shape=(n, k))
+        self.index = {(qid, j): (off, length) for qid, j, off, length in self.meta["index"]}
+
+    def get(self, row, device):
+        off, length = self.index[(row.qid, row.j)]
+        assert length == len(row.prefix) - row.start, "reference cache does not match these rows"
+        return (torch.from_numpy(np.array(self.ids[off: off + length], dtype=np.int64)).to(device),
+                torch.from_numpy(np.array(self.logp[off: off + length])).to(device))
+
+
+def answer_kl(model, states, rows, ref_topk=None):
     """[len(rows)] KL(current || untrained) over the vocabulary, summed over each row's cached completion tokens
     before the confidence. states: the current model's last hidden states [rows, width, d] (right-padded, as
-    level_logps returns them); the untrained ones come from a no-grad pass with the adapter off."""
+    level_logps returns them). The untrained side is a no-grad pass with the adapter off, or with ref_topk the
+    cached top-k log-probs (coarse-grained KL, never more than the exact one)."""
     base = model.get_base_model()
     out = []
-    for b, (_, prefix, _, start) in enumerate(rows):
-        with torch.no_grad(), model.disable_adapter():
-            ids = torch.tensor([prefix], device=states.device)
-            ref = base.model(input_ids=ids, use_cache=False).last_hidden_state[0, start - 1: len(prefix) - 1]
-        cur = states[b, start - 1: len(prefix) - 1]  # position t predicts token t + 1
+    for b, row in enumerate(rows):
+        cur = states[b, row.start - 1: len(row.prefix) - 1]  # position t predicts token t + 1
+        if ref_topk is None:
+            with torch.no_grad(), model.disable_adapter():
+                ids = torch.tensor([row.prefix], device=states.device)
+                ref = base.model(input_ids=ids, use_cache=False).last_hidden_state[0, row.start - 1: len(row.prefix) - 1]
+            chunk = lambda c: (_chunk_kl, cur[c: c + KL_CHUNK], ref[c: c + KL_CHUNK])
+        else:
+            ref_ids, ref_logp = ref_topk.get(row, states.device)
+            chunk = lambda c: (_chunk_kl_topk, cur[c: c + KL_CHUNK], ref_ids[c: c + KL_CHUNK], ref_logp[c: c + KL_CHUNK])
         total = states.new_zeros((), dtype=torch.float32)
-        for c in range(0, len(ref), KL_CHUNK):
-            total = total + checkpoint(_chunk_kl, base.lm_head, cur[c: c + KL_CHUNK], ref[c: c + KL_CHUNK],
-                                       use_reentrant=False)
+        for c in range(0, len(cur), KL_CHUNK):
+            fn, *tensors = chunk(c)
+            total = total + checkpoint(fn, base.lm_head, *tensors, use_reentrant=False)
         out.append(total)
     return torch.stack(out)
 
@@ -145,13 +184,13 @@ def evaluate(model, rows, values, score, batch, drift_rows=()):
     greedy, expected, mass, y = [], [], [], []
     for part in chunks(rows, batch):
         logps, picks = score(model, [r[1] for r in part], greedy=True)
-        for q, k, (_, _, correct, _) in zip(logps.exp().cpu(), picks, part):
+        for q, k, row in zip(logps.exp().cpu(), picks, part):
             greedy.append(np.nan if k is None else values[k].item())
             mass.append(q.sum().item())
             expected.append((q * values).sum().item() / max(q.sum().item(), 1e-9))
-            y.append(correct)
+            y.append(row.correct)
     kls = [answer_kl(model, score(model, [r[1]], hidden=True)[1], [r]).item() for r in drift_rows]
-    tokens = sum(len(r[1]) - r[3] for r in drift_rows)
+    tokens = sum(len(r.prefix) - r.start for r in drift_rows)
     model.train()
     g, e, y = np.array(greedy), np.array(expected), np.array(y)
     ok = ~np.isnan(g)
@@ -182,6 +221,7 @@ def main():
     ap.add_argument("--dev-limit", type=int, default=None)
     ap.add_argument("--drift-rows", type=int, default=200, help="dev rows for the answer-KL metric (0 = off)")
     ap.add_argument("--answer-kl", type=float, default=1.0, help="W: weight of the answer-KL penalty (0 = off)")
+    ap.add_argument("--ref-topk", default=None, help="ref_topk.py cache of --train for the penalty (default: live pass)")
     ap.add_argument("--max-prefix", type=int, default=4608)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
@@ -221,6 +261,12 @@ def main():
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch)
     values_gpu = values.cuda()
+    ref_topk = RefTopk(args.ref_topk) if args.ref_topk else None
+    if ref_topk:
+        m = ref_topk.meta
+        assert (m["rollouts"], m["max_prefix"], m["model"]) == (os.path.abspath(args.train), args.max_prefix, args.model), \
+            f"--ref-topk was built for {m['rollouts']} (max_prefix {m['max_prefix']}, {m['model']})"
+        assert all((r.qid, r.j) in ref_topk.index for r in train), "--ref-topk is missing training rows"
 
     drift_rows = dev[: args.drift_rows] if args.scorer == "digit" else []
     evaluate_dev = lambda: evaluate(model, dev, values, score, args.eval_batch, drift_rows)
@@ -240,10 +286,10 @@ def main():
                 with torch.no_grad():
                     qs = torch.cat([score(model, [r[1] for r in part]).exp().float()
                                     for part in chunks(group, args.eval_batch)])
-                for q, (_, _, correct, _) in zip(qs, group):
+                for q, row in zip(qs, group):
                     probs = torch.cat([q, (1 - q.sum()).clamp_min(0)[None]])
                     j = torch.multinomial(probs / probs.sum(), 1).item()
-                    reward = 0.0 if j == len(q) else rlcr_reward(values_gpu[j], torch.tensor(correct, device=values_gpu.device)).item()
+                    reward = 0.0 if j == len(q) else rlcr_reward(values_gpu[j], torch.tensor(row.correct, device=values_gpu.device)).item()
                     draws.append((j, reward))
                 baseline = np.mean([r for _, r in draws])
             for start in range(0, len(group), args.micro_batch):
@@ -262,7 +308,7 @@ def main():
                         logq = torch.log1p(-row.exp().sum().clamp(max=1 - 1e-6)) if j == len(row) else row[j]
                         loss = loss - (reward - baseline) * logq
                 if args.answer_kl:
-                    kl = answer_kl(model, states, part)
+                    kl = answer_kl(model, states, part, ref_topk)
                     loss = loss + args.answer_kl * kl.sum()
                     stats["answer_kl"] += kl.sum().item() / n_rows
                 (loss / n_rows).backward()
