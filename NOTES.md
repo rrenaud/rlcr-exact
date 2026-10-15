@@ -111,6 +111,18 @@ The differences are within vLLM's batch nondeterminism at temperature 0.
 The fresh dev split behaves like the official test, confirming the fresh draw is in-distribution:
 accuracy 0.702, Brier 0.179, ECE 0.042, AUROC 0.720 (format ok 98.9%).
 
+**Fresh train rollouts** (2,000 problems x 8, temperature 0.7; `rollouts_math_fresh_train.jsonl`, 16,000
+rollouts, 203 MB plus a 17 MB top-k file): format ok 99.3%, accuracy 0.711, Brier 0.174, **ECE 0.036**,
+AUROC 0.721. Accuracy by stated confidence is close to the diagonal: 0.1 -> 0.13, 0.2 -> 0.22, 0.3 -> 0.33,
+0.4 -> 0.40, 0.5 -> 0.48, 0.6 -> 0.56, 0.7 -> 0.70, 0.8 -> 0.84, 0.9 -> 0.88. 34.7% of problems have mixed
+correctness across their 8 samples. Within a problem the stated confidence barely moves (sd 0.07), and
+mean confidence correlates 0.52 with per-problem accuracy.
+**Implication:** in-domain, at the training temperature, the released model is already calibrated in the
+large. The headroom is in discrimination. AUROC is 0.72, while RLCR's own RLVR-classifier baseline reaches
+0.81 from the reasoning text (Brier 0.164 vs 0.181 on test). Its confidence also does not separate correct
+from incorrect samples of the same problem. Stage A should be judged mainly on AUROC/Brier and on
+within-problem resolution, with ECE as a guard. Out-of-domain sets remain where ECE has room.
+
 59% of test rows say 0.8 (84% correct). The rows at 0.6–0.7 are overconfident (51–55% correct), and the rows
 at 0.2–0.3 are slightly underconfident (32–38% correct). Headroom is modest in-domain; the bigger
 miscalibrations found in `~/rlcr_platt` are out-of-domain (SimpleQA, CommonsenseQA).
@@ -118,9 +130,8 @@ miscalibrations found in `~/rlcr_platt` are out-of-domain (SimpleQA, Commonsense
 ## Status (2026-10-15)
 
 - `rlcr-math-cache` run `run-20261015T212410Z-d16f220bfe` (`scripts/cache_math.sh`, with the shared logging):
-  official test and fresh dev greedy, then fresh train (2,000 problems x 8, temperature 0.7). An earlier
-  text-only run (`run-20261015T210403Z-e106aa7212`) was cancelled to add logprob logging. Test and dev
-  are done; train is running.
+  official test and fresh dev greedy, then fresh train (2,000 problems x 8, temperature 0.7). **Complete.**
+  An earlier text-only run (`run-20261015T210403Z-e106aa7212`) was cancelled to add logprob logging.
 - `analyze_rollouts.py` and `train_frozen.py` read the per-question schema. The trainer cuts prefixes from
   the sampled token ids. On the test cache, all 743 well-formed rows have a confidence tail that is exactly
   one of the 228 candidate token sequences.
