@@ -239,6 +239,11 @@ Informed by `rewarding_doubt`'s sweeps (`docs/sweeps/README.md` there; reports 0
   cost calibration there). Our completions are ~700 tokens against their few-token answers, so the summed
   penalty is much stronger per answer; per-token KL is reported too. The no-penalty run finishes as the
   W = 0 reference. Eligibility adds: report `answer_kl` per completion and per token at the final step.
+  The training penalty uses a cached reference (`scripts/ref_topk.py`, gpuq `run-20261015T235922Z-0e08242a9b`):
+  the untrained model's top-64 log-probs at all 12.3M training completion positions (4.4 GiB), computed
+  once. It is coarse-grained (top-64 plus a rest bucket, never more than the exact KL), as in
+  rewarding_doubt's `topk_answer_kl`. This saves a reference forward per row per step in every sweep run. Dev
+  `answer_kl` stays the exact full-vocabulary KL from a live pass.
   W is not tuned unless every lr at W = 1 fails to move dev Brier/AUROC beyond the seed spread.
 - **Headline:** seeds 1 and 2 at each objective's chosen lr. Report official-test greedy Brier / AUROC / ECE as
   mean ± sd over 3 seeds, against the untrained checkpoint. A difference counts only if it exceeds the seed
