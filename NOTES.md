@@ -5,8 +5,10 @@ Goal: port the exact expected-reward confidence objective from
 Rewards*, arXiv 2507.16806; code [damanimehul/RLCR](https://github.com/damanimehul/RLCR)), and test whether
 it improves calibration over RLCR's sampled GRPO signal. Summary as of 2026-10-15.
 
-The subdirectory `rlcr-reward-conf-weighted-tt-scaling/` belongs to a separate work stream (another session)
-and is not covered here.
+This directory is a git repo (`main`). The subdirectories `rlcr-reward-conf-weighted-tt-scaling/`
+(conf-weighted-vote work stream) and `rlcr-judge/` (judge work, a worktree of that repo) are other sessions'
+own repos; they are git-ignored here and not covered. `data/` is ignored too: rebuild it with
+`scripts/build_math_fresh.py` and `scripts/math_unseen.py` (it derives from the gated Big-Math dataset).
 
 ## Decisions so far
 
@@ -74,13 +76,13 @@ and is not covered here.
   results, and wrappers add `timeout`.
 - All GPU work goes through `gpuq` (experiments `rlcr-4090-fit`, `rlcr-math-cache`).
 - **Rollout logging is shared with the conf-weighted-vote work stream.** Its repo
-  `rlcr-reward-conf-weighted-tt-scaling/` (git, `main` @ `8adabe2`) owns `logprob_spans.py`, documented
-  there as a stable interface. `scripts/cache_rollouts.py` imports it by path and writes the same schema:
+  `rlcr-reward-conf-weighted-tt-scaling/` (git `main`) owns `logprob_spans.py`, documented there as a
+  stable interface since `8adabe2`. `scripts/cache_rollouts.py` imports it by path and writes the same schema:
   per-question JSONL with prompt/completion ids, sampled logprobs and policy metadata, plus top-64 raw
-  logprobs over the `<answer>` and `<confidence>` spans in `.topk.jsonl.gz`. That session will fold my
-  additions (jsonl input, greedy mode, chunking/resume, RLCR labels, child-process cleanup) into its
-  `rollout_vllm.py`, along with an infra revision in the policy metadata. I switch to it after checking
-  it reproduces my records. Neither session edits the other's files.
+  logprobs over the `<answer>` and `<confidence>` spans in `.topk.jsonl.gz`. That session folded my
+  additions (jsonl input, greedy mode, chunking/resume, RLCR labels, infra revision in the policy) into its
+  `rollout_vllm.py` at `0a690f0`. Switching to it is pending a check that it reproduces my records on a
+  small greedy split. Neither session edits the other's files.
 
 ## Measurements
 
@@ -100,8 +102,11 @@ in 24 GB.
 
 | | Accuracy | Brier | ECE | AUROC |
 |---|---|---|---|---|
-| Mine | 0.698 | 0.181 | 0.058 | 0.723 |
+| Mine, text-only run | 0.698 | 0.181 | 0.058 | 0.723 |
+| Mine, logged rerun | 0.692 | 0.182 | 0.056 | 0.722 |
 | Released eval | 0.687 | 0.181 | 0.050 | 0.726 |
+
+The differences are within vLLM's batch nondeterminism at temperature 0.
 
 The fresh dev split behaves like the official test, confirming the fresh draw is in-distribution:
 accuracy 0.702, Brier 0.179, ECE 0.042, AUROC 0.720 (format ok 98.9%).
@@ -114,10 +119,11 @@ miscalibrations found in `~/rlcr_platt` are out-of-domain (SimpleQA, Commonsense
 
 - `rlcr-math-cache` run `run-20261015T212410Z-d16f220bfe` (`scripts/cache_math.sh`, with the shared logging):
   official test and fresh dev greedy, then fresh train (2,000 problems x 8, temperature 0.7). An earlier
-  text-only run (`run-20261015T210403Z-e106aa7212`) was cancelled to add logprob logging; its test/dev
-  metrics are the ones quoted above. `analyze_rollouts.py` and `train_frozen.py` still read the old
-  per-rollout schema and need updating to the per-question one (use `prompt_ids` + `completion_ids` cut
-  with `logprob_spans.cut_point(..., "confidence")` instead of retokenizing).
+  text-only run (`run-20261015T210403Z-e106aa7212`) was cancelled to add logprob logging. Test and dev
+  are done; train is running.
+- `analyze_rollouts.py` and `train_frozen.py` read the per-question schema. The trainer cuts prefixes from
+  the sampled token ids. On the test cache, all 743 well-formed rows have a confidence tail that is exactly
+  one of the 228 candidate token sequences.
 - `scripts/train_frozen.py` is written but **not yet run on GPU**.
 
 ## Next steps
