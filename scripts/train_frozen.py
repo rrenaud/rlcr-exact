@@ -2,13 +2,18 @@
 
 Each training row is a cached rollout of the released checkpoint, cut after "<confidence>", with RLCR's
 correctness label for its answer. The answer and analysis are fixed; only the distribution of the
-confidence completion (114 strings x 2 end tokens, scored exactly through a trie) is trained.
+confidence completion is trained, over one of two candidate sets scored exactly:
+
+  --scorer trie:  114 strings x 2 end tokens, through a token trie (trie_score.py)
+  --scorer digit: the 11 one-decimal levels 0.0 .. 1.0, from "0" "." appended to the prefix (digit_score.py);
+                  the tail after the digit is not scored
 
   exact:   maximize sum_j q_j R_j (the unlisted mass earns 0, as a malformed completion does in RLCR)
   sampled: GRPO on the confidence tokens alone: sample one completion per row from q (or "other"),
            advantage = reward minus its problem group's mean (no std division, as in RLCR), loss -A log q
 
-usage: train_frozen.py --train ROLLOUTS --dev ROLLOUTS [--test ROLLOUTS] --objective exact|sampled ...
+usage: train_frozen.py --train ROLLOUTS --dev ROLLOUTS [--test ROLLOUTS] --objective exact|sampled
+                       [--scorer trie|digit] ...
 """
 import argparse, collections, json, math, os, random, sys, time
 
@@ -20,10 +25,15 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from rlcr_exact.confidence import exact_objective, make_candidates, rlcr_reward
+from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
 from rlcr_exact.trie_score import candidate_logps
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "rlcr-reward-conf-weighted-tt-scaling"))
 from logprob_spans import cut_point, make_token_bytes
+
+
+# Every linear layer of a Qwen2 block, as "all-linear" selects; peft refuses a string with layers_to_transform.
+LINEAR_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 
 def load_rows(path, token_bytes, max_prefix):
@@ -46,22 +56,40 @@ def load_rows(path, token_bytes, max_prefix):
     return rows, dict(dropped)
 
 
+def make_scorer(name, tok):
+    """(values [K], score, description) where score(model, prefixes, greedy) gives [len(prefixes), K] logps,
+    plus with greedy=True the index of the greedy candidate per row (None when greedy leaves the set)."""
+    if name == "digit":
+        ids = DigitIds.from_tokenizer(tok)
+        return LEVELS, lambda model, prefixes, greedy=False: level_logps(model, prefixes, ids, greedy), dict(levels=len(LEVELS))
+    cands = make_candidates(tok)
+
+    def score(model, prefixes, greedy=False):
+        outs = [candidate_logps(model, p, cands.trie, greedy=greedy) for p in prefixes]
+        return (torch.stack([o[0] for o in outs]), [o[1] for o in outs]) if greedy else torch.stack(outs)
+    return cands.values, score, dict(candidates=len(cands.strings), trie_nodes=len(cands.trie.tokens))
+
+
+def chunks(xs, n):
+    return [xs[i: i + n] for i in range(0, len(xs), n)]
+
+
 def ece(c, y, bins=10):
     b = np.minimum((c * bins).astype(int), bins - 1)
     return float(sum((b == k).mean() * abs(y[b == k].mean() - c[b == k].mean()) for k in range(bins) if (b == k).any()))
 
 
 @torch.no_grad()
-def evaluate(model, rows, cands):
+def evaluate(model, rows, values, score, batch):
     model.eval()
     greedy, expected, mass, y = [], [], [], []
-    for _, ids, correct in rows:
-        logps, k = candidate_logps(model, ids, cands.trie, greedy=True)
-        q = logps.exp().cpu()
-        greedy.append(np.nan if k is None else cands.values[k].item())
-        mass.append(q.sum().item())
-        expected.append((q * cands.values).sum().item() / max(q.sum().item(), 1e-9))
-        y.append(correct)
+    for part in chunks(rows, batch):
+        logps, picks = score(model, [ids for _, ids, _ in part], greedy=True)
+        for q, k, (_, _, correct) in zip(logps.exp().cpu(), picks, part):
+            greedy.append(np.nan if k is None else values[k].item())
+            mass.append(q.sum().item())
+            expected.append((q * values).sum().item() / max(q.sum().item(), 1e-9))
+            y.append(correct)
     model.train()
     g, e, y = np.array(greedy), np.array(expected), np.array(y)
     ok = ~np.isnan(g)
@@ -77,6 +105,9 @@ def main():
     ap.add_argument("--model", default="mehuldamani/big-math-digits-v2-brier-base-tabc")
     ap.add_argument("--train", required=True); ap.add_argument("--dev", required=True); ap.add_argument("--test")
     ap.add_argument("--objective", choices=["exact", "sampled"], required=True)
+    ap.add_argument("--scorer", choices=["trie", "digit"], default="trie")
+    ap.add_argument("--micro-batch", type=int, default=1, help="rows per forward/backward when training")
+    ap.add_argument("--eval-batch", type=int, default=1, help="rows per no-grad forward (evaluation, sampling)")
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--lora-r", type=int, default=16)
     ap.add_argument("--lora-first-layer", type=int, default=0, help="adapt only layers >= this one")
@@ -89,7 +120,8 @@ def main():
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     args = ap.parse_args()
     random.seed(args.seed); torch.manual_seed(args.seed)
-    log_path = os.path.join(args.out, f"train_{args.objective}_s{args.seed}.jsonl")
+    run_name = f"{args.objective}_s{args.seed}" if args.scorer == "trie" else f"{args.scorer}_{args.objective}_s{args.seed}"
+    log_path = os.path.join(args.out, f"train_{run_name}.jsonl")
 
     def log(**rec):
         print(json.dumps(rec), flush=True)
@@ -97,7 +129,7 @@ def main():
             f.write(json.dumps(rec) + "\n")
 
     tok = AutoTokenizer.from_pretrained(args.model)
-    cands = make_candidates(tok)
+    values, score, scorer_info = make_scorer(args.scorer, tok)
     token_bytes = make_token_bytes(tok)
     train, dropped = load_rows(args.train, token_bytes, args.max_prefix)
     dev, dev_dropped = load_rows(args.dev, token_bytes, args.max_prefix)
@@ -108,20 +140,20 @@ def main():
         groups[row[0]].append(row)
     group_ids = sorted(groups)
     log(event="data", train_rows=len(train), train_problems=len(groups), dropped=dropped, dev_rows=len(dev),
-        dev_dropped=dev_dropped, test_rows=len(test) if test else 0, candidates=len(cands.strings),
-        trie_nodes=len(cands.trie.tokens), args=vars(args))
+        dev_dropped=dev_dropped, test_rows=len(test) if test else 0, **scorer_info, args=vars(args))
 
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16, attn_implementation="sdpa",
                                                  device_map={"": 0})
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     layers = list(range(args.lora_first_layer, model.config.num_hidden_layers))
     model = get_peft_model(model, LoraConfig(r=args.lora_r, lora_alpha=args.lora_r, lora_dropout=0.0,
-                                             target_modules="all-linear", layers_to_transform=layers))
+                                             target_modules=LINEAR_MODULES, layers_to_transform=layers))
     model.train()
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
-    values = cands.values.cuda()
+    evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch)
+    values_gpu = values.cuda()
 
-    log(event="eval", step=0, split="dev", **evaluate(model, dev, cands))
+    log(event="eval", step=0, split="dev", **evaluate_on(dev))
     order, t0 = [], time.time()
     for step in range(1, args.steps + 1):
         if len(order) < args.problems_per_step:
@@ -134,35 +166,38 @@ def main():
             # Sampled: draw every row's completion first (no grad) so the group baseline is known.
             if args.objective == "sampled":
                 draws = []
-                for _, ids, correct in group:
-                    with torch.no_grad():
-                        q = candidate_logps(model, ids, cands.trie).exp().float()
+                with torch.no_grad():
+                    qs = torch.cat([score(model, [ids for _, ids, _ in part]).exp().float()
+                                    for part in chunks(group, args.eval_batch)])
+                for q, (_, _, correct) in zip(qs, group):
                     probs = torch.cat([q, (1 - q.sum()).clamp_min(0)[None]])
                     j = torch.multinomial(probs / probs.sum(), 1).item()
-                    reward = 0.0 if j == len(q) else rlcr_reward(values[j], torch.tensor(correct, device=values.device)).item()
+                    reward = 0.0 if j == len(q) else rlcr_reward(values_gpu[j], torch.tensor(correct, device=values_gpu.device)).item()
                     draws.append((j, reward))
                 baseline = np.mean([r for _, r in draws])
-            for k, (_, ids, correct) in enumerate(group):
-                logps = candidate_logps(model, ids, cands.trie)
-                y = torch.tensor(correct, device=logps.device)
-                expected = exact_objective(logps, values, y)
+            for start in range(0, len(group), args.micro_batch):
+                part = group[start: start + args.micro_batch]
+                logps = score(model, [ids for _, ids, _ in part])  # [rows, K]
+                y = torch.tensor([correct for _, _, correct in part], device=logps.device)
+                expected = exact_objective(logps, values_gpu, y[:, None])  # [rows]
                 if args.objective == "exact":
-                    loss = -expected
+                    loss = -expected.sum()
                 else:
-                    j, reward = draws[k]
-                    logq = torch.log1p(-logps.exp().sum().clamp(max=1 - 1e-6)) if j == len(logps) else logps[j]
-                    loss = -(reward - baseline) * logq
+                    loss = 0
+                    for row, (j, reward) in zip(logps, draws[start: start + len(part)]):
+                        logq = torch.log1p(-row.exp().sum().clamp(max=1 - 1e-6)) if j == len(row) else row[j]
+                        loss = loss - (reward - baseline) * logq
                 (loss / n_rows).backward()
-                stats["expected_reward"] += expected.item() / n_rows
+                stats["expected_reward"] += expected.sum().item() / n_rows
                 stats["mass"] += logps.exp().sum().item() / n_rows
         opt.step(); opt.zero_grad(set_to_none=True)
         if step % 10 == 0:
             log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, **{k: round(v, 4) for k, v in stats.items()})
         if step % args.eval_every == 0 or step == args.steps:
-            log(event="eval", step=step, split="dev", **evaluate(model, dev, cands))
+            log(event="eval", step=step, split="dev", **evaluate_on(dev))
     if test:
-        log(event="eval", step=args.steps, split="test", **evaluate(model, test, cands))
-    model.save_pretrained(os.path.join(args.out, "checkpoints", f"{args.objective}_s{args.seed}"))
+        log(event="eval", step=args.steps, split="test", **evaluate_on(test))
+    model.save_pretrained(os.path.join(args.out, "checkpoints", run_name))
 
 
 if __name__ == "__main__":
