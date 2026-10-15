@@ -5,7 +5,8 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-from train_frozen import completion_logprob, ece, evaluate
+import train_frozen
+from train_frozen import answer_kl, ece, evaluate
 from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
 from test_digit_score import IDS
 from test_trie_score import tiny_model
@@ -24,22 +25,49 @@ def test_centred_ece_is_stable_at_levels():
     assert abs(ece(levels, yy) - ece(levels, yy, centred=True)) < 1e-9
 
 
-def test_completion_logprob_matches_brute_force():
-    model = tiny_model()
-    prefix, start = [11, 12, 13, 14, 15, 16, 17], 3
-    with torch.no_grad():
-        logp = model(input_ids=torch.tensor([prefix])).logits[0].float().log_softmax(-1)
-        want = sum(logp[p - 1, prefix[p]].item() for p in range(start, len(prefix)))
-        assert abs(completion_logprob(model, prefix, start) - want) < 1e-4
+ROWS = [("a", [11, 12, 13, 14, 15, 16], 1.0, 2), ("b", [21, 22, 23, 24], 0.0, 1), ("c", [31, 32, 33, 34, 35, 36, 37], 1.0, 3)]
+score = lambda m, prefixes, greedy=False, hidden=False: level_logps(m, prefixes, IDS, greedy, hidden)
 
 
-def test_evaluate_reports_zero_drift_for_the_same_model():
-    model = tiny_model()
-    rows = [("a", [11, 12, 13, 14, 15], 1.0, 2), ("b", [21, 22, 23, 24], 0.0, 2), ("c", [31, 32, 33, 34, 35, 36], 1.0, 3)]
-    score = lambda m, prefixes, greedy=False: level_logps(m, prefixes, IDS, greedy)
-    metrics, base = evaluate(model, rows, LEVELS, score, 2, rows)
-    again = evaluate(model, rows, LEVELS, score, 2, rows, base)[0]
-    assert abs(again["answer_drift_mean"]) < 1e-6 and abs(again["answer_drift_max"]) < 1e-6
+def lora(init_zero):
+    from peft import LoraConfig, get_peft_model
+    return get_peft_model(tiny_model(), LoraConfig(r=4, lora_alpha=4, init_lora_weights=init_zero,
+                                                   target_modules=train_frozen.LINEAR_MODULES))
+
+
+def brute_force_kl(model, prefix, start):
+    """KL(current || adapter off) at each position predicting prefix[start:], summed, from two full forwards."""
+    ids = torch.tensor([prefix])
+    cur = model(input_ids=ids).logits[0].float().log_softmax(-1)[start - 1: len(prefix) - 1]
+    with model.disable_adapter():
+        ref = model(input_ids=ids).logits[0].float().log_softmax(-1)[start - 1: len(prefix) - 1]
+    return (cur.exp() * (cur - ref)).sum()
+
+
+def test_answer_kl_matches_brute_force_and_is_zero_untrained():
+    for init_zero in (True, False):
+        model = lora(init_zero).eval()
+        with torch.no_grad():
+            got = answer_kl(model, score(model, [r[1] for r in ROWS], hidden=True)[1], ROWS)
+            want = torch.stack([brute_force_kl(model, r[1], r[3]) for r in ROWS])
+        assert torch.allclose(got, want, atol=1e-5), (got, want)
+        assert (got.abs().max() < 1e-6) if init_zero else (got.min() > 0)
+
+
+def test_chunked_answer_kl_has_the_same_gradients(monkeypatch):
+    def grads(chunk):
+        monkeypatch.setattr(train_frozen, "KL_CHUNK", chunk)
+        model = lora(False).train()
+        answer_kl(model, score(model, [r[1] for r in ROWS], hidden=True)[1], ROWS).sum().backward()
+        return {n: p.grad.clone() for n, p in model.named_parameters() if p.requires_grad}
+    whole, chunked = grads(512), grads(2)
+    assert all(torch.allclose(whole[n], chunked[n], atol=1e-5) for n in whole)
+
+
+def test_evaluate_reports_zero_answer_kl_untrained():
+    model = lora(True)
+    metrics = evaluate(model, ROWS, LEVELS, score, 2, ROWS)
+    assert abs(metrics["answer_kl"]) < 1e-4 and abs(metrics["answer_kl_token"]) < 1e-4
     assert metrics["rows"] == 3 and "greedy_sd" in metrics
 
 

@@ -35,12 +35,13 @@ class DigitIds:
         return cls(zero=ids[0], one=ids[1], dot=ids[10], digits=ids[:10], close=tok.convert_tokens_to_ids("</"))
 
 
-def level_logps(model, prefixes: list[list[int]], ids: DigitIds, greedy: bool = False):
+def level_logps(model, prefixes: list[list[int]], ids: DigitIds, greedy: bool = False, hidden: bool = False):
     """[batch, 12] log-probabilities of the LEVELS after each prefix (differentiable), from one forward pass.
 
     With greedy=True also returns, per row, the level that greedy decoding reaches, or None when it leaves the
     format: the argmax first token over the vocabulary must be `1` (level 1.0) or `0`; after `0` the argmax
-    must be `.` (then a digit) or `</` (the bare "0").
+    must be `.` (then a digit) or `</` (the bare "0"). With hidden=True also returns the last hidden states
+    [batch, width, d] of the same forward (prefix positions are unaffected by the appended tokens).
     """
     model = model.get_base_model() if hasattr(model, "get_base_model") else model  # unwrap PEFT
     device = next(model.parameters()).device
@@ -52,16 +53,17 @@ def level_logps(model, prefixes: list[list[int]], ids: DigitIds, greedy: bool = 
     for b, p in enumerate(prefixes):
         input_ids[b, : len(p) + 2] = torch.tensor(p + [ids.zero, ids.dot])
         mask[b, : len(p) + 2] = 1
-    hidden = model.model(input_ids=input_ids.to(device), attention_mask=mask.to(device), use_cache=False).last_hidden_state
+    states = model.model(input_ids=input_ids.to(device), attention_mask=mask.to(device), use_cache=False).last_hidden_state
     # Logits only where a confidence token is predicted: after the prefix, after `0`, after `0.`.
     rows = torch.arange(len(prefixes), device=device)[:, None]
     cols = torch.tensor(lens, device=device)[:, None] - 1 + torch.arange(3, device=device)
-    logp = model.lm_head(hidden[rows, cols]).float().log_softmax(-1)  # [batch, 3, vocab]
+    logp = model.lm_head(states[rows, cols]).float().log_softmax(-1)  # [batch, 3, vocab]
     zero_dot = logp[:, 0, ids.zero] + logp[:, 1, ids.dot]
     bare_zero = logp[:, 0, ids.zero] + logp[:, 1, ids.close]
     out = torch.cat([zero_dot[:, None] + logp[:, 2, ids.digits], logp[:, 0, ids.one, None], bare_zero[:, None]], dim=-1)
+    extra = (states,) if hidden else ()
     if not greedy:
-        return out
+        return (out, *extra) if extra else out
     argmax = logp.argmax(-1).tolist()
     digit_level = {t: d for d, t in enumerate(ids.digits)}
     picks = []
@@ -74,4 +76,4 @@ def level_logps(model, prefixes: list[list[int]], ids: DigitIds, greedy: bool = 
             picks.append(BARE_ZERO)
         else:
             picks.append(None)
-    return out, picks
+    return (out, picks, *extra)

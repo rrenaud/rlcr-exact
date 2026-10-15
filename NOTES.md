@@ -231,6 +231,15 @@ Informed by `rewarding_doubt`'s sweeps (`docs/sweeps/README.md` there; reports 0
   Stage A never regenerates answers.
 - **Selection:** per objective, the eligible lr with the lowest final dev greedy Brier. Within 0.005 Brier,
   prefer the lower lr. AUROC is secondary. ECE is never used alone: a collapsed run can have excellent ECE.
+- **Amendment (2026-10-15, before any penalized run):** the first run (exact, 3e-4, no penalty,
+  `run-20261015T232731Z-fd144d67c7`) drifted its answers by 34.6 nats per completion (0.05/token, max 59) by
+  step 100, with no calibration gain yet (dev Brier 0.188 -> 0.190). This repeats rewarding_doubt's sweep 11.
+  The sweep now adds its answer-KL penalty: loss += W * KL(current || untrained) over the vocabulary,
+  summed over the cached completion tokens before the confidence, with **W = 1** (their LoRA setting; W = 10
+  cost calibration there). Our completions are ~700 tokens against their few-token answers, so the summed
+  penalty is much stronger per answer; per-token KL is reported too. The no-penalty run finishes as the
+  W = 0 reference. Eligibility adds: report `answer_kl` per completion and per token at the final step.
+  W is not tuned unless every lr at W = 1 fails to move dev Brier/AUROC beyond the seed spread.
 - **Headline:** seeds 1 and 2 at each objective's chosen lr. Report official-test greedy Brier / AUROC / ECE as
   mean ± sd over 3 seeds, against the untrained checkpoint. A difference counts only if it exceeds the seed
   spread. In-domain the target is discrimination (Brier, AUROC), since ECE is already ~0.04.

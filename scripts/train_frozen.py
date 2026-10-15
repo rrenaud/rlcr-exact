@@ -17,9 +17,12 @@ Defaults follow the rrenaud/rewarding_doubt sweeps (docs/sweeps): Adam at a cons
 
 Evaluation reports greedy and expected confidence. Greedy ECE uses the paper's 10 floor bins. Expected ECE uses
 bins centred on the levels (nearest 0.1), because an expected confidence of 0.79998 vs 0.8 otherwise flips a bin.
-It also reports answer drift: on the first --drift-rows dev rows, the summed log p_untrained - log p_current over
-the cached completion tokens before the confidence. The cache freezes the answers, so this is the warning that
-regenerated answers would change.
+Answer drift: LoRA acts at every position, so training only the confidence also moves the reasoning and answer
+(rewarding_doubt, sweep 11). answer_kl is KL(current || untrained) over the vocabulary, summed over each row's
+cached completion tokens before the confidence; the untrained model is the same one with the adapter off.
+--answer-kl W adds W times it to each row's loss (rewarding_doubt's LoRA setting is W = 1). Dev metrics report
+it per completion and per token on the first --drift-rows rows. The cache freezes the answers, so this is
+the only signal that regenerated answers would change.
 
 usage: train_frozen.py --train ROLLOUTS --dev ROLLOUTS [--test ROLLOUTS] --objective exact|sampled
                        [--scorer digit|trie] ...
@@ -29,6 +32,7 @@ import argparse, collections, json, math, os, random, sys, time
 import numpy as np
 import torch
 from peft import LoraConfig, get_peft_model
+from torch.utils.checkpoint import checkpoint
 from sklearn.metrics import roc_auc_score
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -67,10 +71,12 @@ def load_rows(path, token_bytes, max_prefix):
 
 def make_scorer(name, tok):
     """(values [K], score, description) where score(model, prefixes, greedy) gives [len(prefixes), K] logps,
-    plus with greedy=True the index of the greedy candidate per row (None when greedy leaves the set)."""
+    plus with greedy=True the index of the greedy candidate per row (None when greedy leaves the set). The digit
+    scorer also takes hidden=True and then returns the forward's hidden states last (for answer_kl)."""
     if name == "digit":
         ids = DigitIds.from_tokenizer(tok)
-        return LEVELS, lambda model, prefixes, greedy=False: level_logps(model, prefixes, ids, greedy), dict(levels=len(LEVELS))
+        score = lambda model, prefixes, greedy=False, hidden=False: level_logps(model, prefixes, ids, greedy, hidden)
+        return LEVELS, score, dict(levels=len(LEVELS))
     cands = make_candidates(tok)
 
     def score(model, prefixes, greedy=False):
@@ -104,18 +110,37 @@ def stop_backward_at_first_adapter(model):
             del emb._forward_hooks[key]
 
 
-def completion_logprob(model, prefix, start):
-    """Summed log p of prefix[start:] given what precedes it (the cached reasoning and answer tokens)."""
-    base = model.get_base_model() if hasattr(model, "get_base_model") else model
-    ids = torch.tensor([prefix], device=next(base.parameters()).device)
-    hidden = base.model(input_ids=ids, use_cache=False).last_hidden_state[0, start - 1: -1]
-    logp = base.lm_head(hidden).float().log_softmax(-1)
-    return logp.gather(-1, ids[0, start:, None]).sum().item()
+KL_CHUNK = 512  # completion positions per KL chunk; each chunk is recomputed in backward to bound memory
+
+
+def _chunk_kl(lm_head, h_cur, h_ref):
+    cur = lm_head(h_cur).float().log_softmax(-1)
+    ref = lm_head(h_ref).float().log_softmax(-1)
+    return (cur.exp() * (cur - ref)).sum()
+
+
+def answer_kl(model, states, rows):
+    """[len(rows)] KL(current || untrained) over the vocabulary, summed over each row's cached completion tokens
+    before the confidence. states: the current model's last hidden states [rows, width, d] (right-padded, as
+    level_logps returns them); the untrained ones come from a no-grad pass with the adapter off."""
+    base = model.get_base_model()
+    out = []
+    for b, (_, prefix, _, start) in enumerate(rows):
+        with torch.no_grad(), model.disable_adapter():
+            ids = torch.tensor([prefix], device=states.device)
+            ref = base.model(input_ids=ids, use_cache=False).last_hidden_state[0, start - 1: len(prefix) - 1]
+        cur = states[b, start - 1: len(prefix) - 1]  # position t predicts token t + 1
+        total = states.new_zeros((), dtype=torch.float32)
+        for c in range(0, len(ref), KL_CHUNK):
+            total = total + checkpoint(_chunk_kl, base.lm_head, cur[c: c + KL_CHUNK], ref[c: c + KL_CHUNK],
+                                       use_reentrant=False)
+        out.append(total)
+    return torch.stack(out)
 
 
 @torch.no_grad()
-def evaluate(model, rows, values, score, batch, drift_rows=(), drift_base=None):
-    """Dev metrics; with drift_rows, also answer drift against drift_base (their untrained completion log-probs)."""
+def evaluate(model, rows, values, score, batch, drift_rows=()):
+    """Dev metrics; with drift_rows, also their answer KL (per completion and per token)."""
     model.eval()
     greedy, expected, mass, y = [], [], [], []
     for part in chunks(rows, batch):
@@ -125,7 +150,8 @@ def evaluate(model, rows, values, score, batch, drift_rows=(), drift_base=None):
             mass.append(q.sum().item())
             expected.append((q * values).sum().item() / max(q.sum().item(), 1e-9))
             y.append(correct)
-    drift = [completion_logprob(model, ids, start) for _, ids, _, start in drift_rows]
+    kls = [answer_kl(model, score(model, [r[1]], hidden=True)[1], [r]).item() for r in drift_rows]
+    tokens = sum(len(r[1]) - r[3] for r in drift_rows)
     model.train()
     g, e, y = np.array(greedy), np.array(expected), np.array(y)
     ok = ~np.isnan(g)
@@ -134,11 +160,9 @@ def evaluate(model, rows, values, score, batch, drift_rows=(), drift_base=None):
         out |= {f"{name}_mean": c.mean(), f"{name}_sd": c.std(), f"{name}_brier": np.mean((c - yy) ** 2),
                 f"{name}_ece": ece(c, yy, centred=name == "expected"),
                 f"{name}_auroc": roc_auc_score(yy, c) if len(set(yy)) > 1 else float("nan")}
-    if drift_rows and drift_base is not None:
-        gap = np.array(drift_base) - np.array(drift)
-        out |= {"answer_drift_mean": gap.mean(), "answer_drift_max": gap.max()}
-    out = {k: round(float(v), 4) for k, v in out.items()}
-    return (out, drift) if drift_rows else out
+    if drift_rows:
+        out |= {"answer_kl": np.mean(kls), "answer_kl_max": np.max(kls), "answer_kl_token": sum(kls) / tokens}
+    return {k: round(float(v), 4) for k, v in out.items()}
 
 
 def main():
@@ -156,13 +180,15 @@ def main():
     ap.add_argument("--steps", type=int, default=500)
     ap.add_argument("--eval-every", type=int, default=100)
     ap.add_argument("--dev-limit", type=int, default=None)
-    ap.add_argument("--drift-rows", type=int, default=200, help="dev rows for the answer-drift metric (0 = off)")
+    ap.add_argument("--drift-rows", type=int, default=200, help="dev rows for the answer-KL metric (0 = off)")
+    ap.add_argument("--answer-kl", type=float, default=1.0, help="W: weight of the answer-KL penalty (0 = off)")
     ap.add_argument("--max-prefix", type=int, default=4608)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     args = ap.parse_args()
     random.seed(args.seed); torch.manual_seed(args.seed)
-    run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_s{args.seed}"
+    run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_W{args.answer_kl:g}_s{args.seed}"
+    assert args.answer_kl == 0 or args.scorer == "digit", "the answer-KL penalty needs the digit scorer's hidden states"
     log_path = os.path.join(args.out, f"train_{run_name}.jsonl")
 
     def log(**rec):
@@ -196,11 +222,9 @@ def main():
     evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch)
     values_gpu = values.cuda()
 
-    # LoRA starts at zero, so step 0 is the untrained model: its completion log-probs are the drift baseline.
-    drift_rows = dev[: args.drift_rows]
-    metrics, drift_base = evaluate(model, dev, values, score, args.eval_batch, drift_rows)
-    log(event="eval", step=0, split="dev", **metrics)
-    evaluate_dev = lambda: evaluate(model, dev, values, score, args.eval_batch, drift_rows, drift_base)[0]
+    drift_rows = dev[: args.drift_rows] if args.scorer == "digit" else []
+    evaluate_dev = lambda: evaluate(model, dev, values, score, args.eval_batch, drift_rows)
+    log(event="eval", step=0, split="dev", **evaluate_dev())
     order, t0 = [], time.time()
     for step in range(1, args.steps + 1):
         if len(order) < args.problems_per_step:
@@ -224,7 +248,10 @@ def main():
                 baseline = np.mean([r for _, r in draws])
             for start in range(0, len(group), args.micro_batch):
                 part = group[start: start + args.micro_batch]
-                logps = score(model, [r[1] for r in part])  # [rows, K]
+                if args.answer_kl:
+                    logps, states = score(model, [r[1] for r in part], hidden=True)  # [rows, K], hidden states
+                else:
+                    logps = score(model, [r[1] for r in part])
                 y = torch.tensor([r[2] for r in part], device=logps.device)
                 expected = exact_objective(logps, values_gpu, y[:, None])  # [rows]
                 if args.objective == "exact":
@@ -234,6 +261,10 @@ def main():
                     for row, (j, reward) in zip(logps, draws[start: start + len(part)]):
                         logq = torch.log1p(-row.exp().sum().clamp(max=1 - 1e-6)) if j == len(row) else row[j]
                         loss = loss - (reward - baseline) * logq
+                if args.answer_kl:
+                    kl = answer_kl(model, states, part)
+                    loss = loss + args.answer_kl * kl.sum()
+                    stats["answer_kl"] += kl.sum().item() / n_rows
                 (loss / n_rows).backward()
                 stats["expected_reward"] += expected.sum().item() / n_rows
                 stats["mass"] += logps.exp().sum().item() / n_rows
