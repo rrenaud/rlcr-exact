@@ -1,0 +1,10 @@
+# Other work streams' own git repos/worktrees under this directory
+/rlcr-reward-conf-weighted-tt-scaling/
+/rlcr-judge/
+# Generated data: rebuild with scripts/build_math_fresh.py and scripts/math_unseen.py
+# (derived from the gated Big-Math dataset, so not redistributed here)
+/data/
+# Session and tool state
+/.claude/
+__pycache__/
+.pytest_cache/
