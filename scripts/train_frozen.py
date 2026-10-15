@@ -26,6 +26,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "rlcr-reward-co
 from logprob_spans import cut_point, make_token_bytes
 
 
+# Every linear layer of a Qwen2 block, as "all-linear" selects; peft refuses a string with layers_to_transform.
+LINEAR_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+
 def load_rows(path, token_bytes, max_prefix):
     """Well-formed rollouts as (problem id, prefix token ids, correctness); counts what was dropped.
 
@@ -116,7 +120,7 @@ def main():
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     layers = list(range(args.lora_first_layer, model.config.num_hidden_layers))
     model = get_peft_model(model, LoraConfig(r=args.lora_r, lora_alpha=args.lora_r, lora_dropout=0.0,
-                                             target_modules="all-linear", layers_to_transform=layers))
+                                             target_modules=LINEAR_MODULES, layers_to_transform=layers))
     model.train()
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     values = cands.values.cuda()
