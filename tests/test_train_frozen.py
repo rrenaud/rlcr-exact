@@ -41,3 +41,28 @@ def test_evaluate_reports_zero_drift_for_the_same_model():
     again = evaluate(model, rows, LEVELS, score, 2, rows, base)[0]
     assert abs(again["answer_drift_mean"]) < 1e-6 and abs(again["answer_drift_max"]) < 1e-6
     assert metrics["rows"] == 3 and "greedy_sd" in metrics
+
+
+def test_backward_stops_at_first_adapter_with_same_grads():
+    from peft import LoraConfig, get_peft_model
+    from train_frozen import LINEAR_MODULES, stop_backward_at_first_adapter
+
+    def run(fix):
+        model = tiny_model()
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        model = get_peft_model(model, LoraConfig(r=4, lora_alpha=4, init_lora_weights=False,
+                                                 target_modules=LINEAR_MODULES, layers_to_transform=[1]))
+        if fix:
+            stop_backward_at_first_adapter(model)
+        model.train()
+        first_layer_needs_grad = []
+        model.get_base_model().model.layers[0].register_forward_hook(
+            lambda mod, inp, out: first_layer_needs_grad.append((out[0] if isinstance(out, tuple) else out).requires_grad))
+        logps = level_logps(model, [[11, 12, 13, 14, 15], [21, 22, 23]], IDS)
+        (logps.exp() * torch.arange(12.0)).sum().backward()
+        return {n: p.grad.clone() for n, p in model.named_parameters() if p.requires_grad}, first_layer_needs_grad[0]
+
+    before, needs_before = run(False)
+    after, needs_after = run(True)
+    assert needs_before and not needs_after  # layer 0 has no adapter: no backward through it after the fix
+    assert before.keys() == after.keys() and all(torch.allclose(before[n], after[n], atol=1e-6) for n in before)

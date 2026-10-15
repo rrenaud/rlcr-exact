@@ -90,6 +90,20 @@ def ece(c, y, bins=10, centred=False):
     return float(sum((b == k).mean() * abs(y[b == k].mean() - c[b == k].mean()) for k in np.unique(b)))
 
 
+def stop_backward_at_first_adapter(model):
+    """Remove the hooks that make the input embeddings require grad.
+
+    transformers' gradient_checkpointing_enable and PEFT each register one (`make_inputs_require_grads`). They are
+    only needed for reentrant checkpointing. With them, backward recomputes and differentiates every layer below
+    the first adapted one for gradients nobody uses. Without them, the untrained early layers run forward only,
+    and the LoRA gradients are unchanged.
+    """
+    emb = (model.get_base_model() if hasattr(model, "get_base_model") else model).get_input_embeddings()
+    for key, hook in list(emb._forward_hooks.items()):
+        if getattr(hook, "__name__", "") == "make_inputs_require_grads":
+            del emb._forward_hooks[key]
+
+
 def completion_logprob(model, prefix, start):
     """Summed log p of prefix[start:] given what precedes it (the cached reasoning and answer tokens)."""
     base = model.get_base_model() if hasattr(model, "get_base_model") else model
@@ -176,6 +190,7 @@ def main():
     layers = list(range(args.lora_first_layer, model.config.num_hidden_layers))
     model = get_peft_model(model, LoraConfig(r=args.lora_r, lora_alpha=args.lora_r, lora_dropout=0.0,
                                              target_modules=LINEAR_MODULES, layers_to_transform=layers))
+    stop_backward_at_first_adapter(model)
     model.train()
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch)
