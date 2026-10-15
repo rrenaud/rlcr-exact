@@ -145,58 +145,58 @@ miscalibrations found in `~/rlcr_platt` are out-of-domain (SimpleQA, Commonsense
   one of the 228 candidate token sequences.
 - `scripts/train_frozen.py` is written but **not yet run on GPU**.
 
-## Simplified 11-level scorer
+## Simplified digit scorer (one-decimal levels)
 
-A simpler alternative to the trie, like the 0–10 scale in `rewarding_doubt`: insist on one decimal, so the
-confidence is one of 11 levels 0.0 .. 1.0. The trie path is kept and stays the default.
+A simpler alternative to the trie, like the 0–10 scale in `rewarding_doubt`: insist on one decimal. The
+confidence is one of 0.0 .. 1.0 or a bare "0" (12 levels, two of them worth 0). Merged into `main`; the trie
+stays as the reference and is still the trainer's default until the GPU comparison below.
 
 - `src/rlcr_exact/digit_score.py`: `level_logps(model, prefixes, DigitIds)` appends `0` `.` to each prefix
-  (right padding, ordinary attention mask, one causal forward for the batch) and reads logits at 3 positions
-  per row: log p(0.d) = log p(`0`|x) + log p(`.`|x 0) + log p(d|x 0.), log p(1.0) = log p(`1`|x). The rest
-  of the mass is malformed (reward 0). `greedy=True` also returns the greedy level: argmax over the vocabulary
-  must be `1` (1.0) or `0`, then `.`, then a digit; otherwise off-format.
-- `tests/test_digit_score.py` (tiny random Qwen2, fp32): log-probs equal brute-force full-sequence scoring,
-  a padded batch equals one row at a time, LoRA gradients equal brute force, greedy agrees with `generate`
-  (including the three off-format exits). All 7 tests pass (`PYTHONPATH=src ~/envs/pytorch/bin/python -m pytest -q tests`).
-- `scripts/train_frozen.py --scorer digit` (default `trie`): values are the 11 levels, exact objective
-  sum_j q_j R_j over them, sampled draws from the 11 levels + "other". `--micro-batch` / `--eval-batch` batch
-  rows (default 1). Eval metrics keep their meaning (greedy, expected, mass, `greedy_off_list`). Digit runs
-  log to `train_digit_{objective}_s{seed}.jsonl`. A CPU smoke run with a tiny random model ran all four
-  scorer x objective pairs; it also found that `target_modules="all-linear"` with `layers_to_transform`
-  raises in peft 0.21, which would have stopped the trainer on GPU (fixed: explicit list of the 7 linears).
+  and runs one causal forward over the batch (right padding, ordinary attention mask), reading logits at 3
+  positions per row:
+  log p(0.d) = log p(`0`|x) + log p(`.`|x 0) + log p(d|x 0.); log p(1.0) = log p(`1`|x);
+  log p("0") = log p(`0`|x) + log p(`</`|x 0). The rest of the mass is malformed (reward 0).
+  `greedy=True` also returns the greedy level: `1` -> 1.0; `0` then `.` then a digit; `0` then `</` -> bare
+  "0"; anything else is off-format.
+- The bare "0" is its own level because the model writes it deliberately (p(`</`|`0`) 0.56–0.92 on those
+  rows) and RLCR pays it as 0. Its logits are already computed, so it costs nothing.
+- Tests (`tests/test_digit_score.py`, tiny random Qwen2, fp32): log-probs equal brute-force full-sequence
+  scoring of each level, a padded batch equals one row at a time, LoRA gradients equal brute force, and greedy
+  agrees with `generate` (1.0, bare "0" and the three off-format exits). With the trie tests, all 7 pass.
+- `scripts/train_frozen.py --scorer digit` (default `trie`): the exact objective sums q_j R_j over the levels,
+  and the sampled objective draws from the levels plus "other". `--micro-batch` / `--eval-batch` batch rows
+  (default 1). Eval metrics keep their meaning. Digit runs log to `train_digit_{objective}_s{seed}.jsonl`.
+  The same branch fixed a bug on main: peft 0.21 rejects `target_modules="all-linear"` with
+  `layers_to_transform`, which would have stopped the trainer at its first step. It now uses the explicit
+  list of the 7 Qwen2 linear layers.
 - Approximations: the tail after the digit (`</confidence>` + end) is not scored, so a trained model could
-  drift there unseen; "0.85" counts as 0.8; "1", "1.0", "1.00" (and "1" + anything) count as 1.0; bare "0"
-  counts as malformed although RLCR rewards it as confidence 0.
+  shift mass there unseen. Check a trained adapter with the trie. "0.85" counts as 0.8; "1" followed by
+  anything counts as 1.0.
 
-**Coverage** (`scripts/format_coverage.py`, cache `run-20261015T212410Z-d16f220bfe`; train is the 750 problems
-x 8 at temperature 0.7 written so far). Among well-formed rows:
+**Coverage** (`scripts/format_coverage.py` on cache `run-20261015T212410Z-d16f220bfe`):
 
-| | test (greedy) | dev (greedy) | train (T=0.7) |
-|---|---|---|---|
-| well-formed rows | 989 | 985 | 5951 |
-| string not a level | 1 ("0") | 0 | 10 (8 "0", 2 "0.75") |
-| tail not exactly `0. d </confidence> <end>` | 1 | 0 | 10 (the same rows) |
+| | test (greedy) | train (2,000 x 8, T=0.7) |
+|---|---|---|
+| well-formed rows | 989 | 15,889 |
+| string is a level | 989 (100%) | 15,883 (99.96%; incl. 15 bare "0") |
+| not a level | 0 | 6: "0.75" x3, "0.85", "0.33", "0.367879" (second digit sampled with p ~ 1) |
 
-From the raw logprobs along the sampled path (top-64 over the confidence span; the span ends at the digit,
-so the step after it uses the sampled logprob of `</`), the probability of leaving the format is tiny:
-mean per row at the first token (not `0`/`1`) 0 / 0 / 1.4e-6 (test / dev / train; max 8.6e-3 on one train row),
-after `0` (not `.`) 0 / 1e-8 / 4.9e-6 (max 2.9e-2), after `0.` (not a digit) 2.5e-7 (max 5e-6), after
-`0.d` (not `</`) 1e-8 / 0 / 5e-8 (max 7e-5), and any tail other than the sampled `</confidence><end>` 1.2e-5
-(max 9e-5). p(`1`) at the first token is about 1e-9. The logged logprobs are rounded to 1e-5.
+Probability of leaving the levels along the sampled path is negligible on train. From the raw logprobs,
+mean per row and maximum over rows:
+- first token not `0`/`1`: mean 2e-6, max 1.1e-2
+- after `0`, neither `.` nor `</`: mean 6e-10, max 3e-6
+- after `0.`, not a digit: mean 2.6e-7, max 5e-6
+- any tail other than the sampled `</confidence><end>`: mean 1.2e-5, max 3.6e-4
 
-Caveats: when the model writes bare "0" it means it (p(`</`|`0`) is 0.56–0.92 on those rows, so this is not
-a "0." prefix cut short): the digit scorer calls that mass malformed while RLCR pays it as 0. On the test
-greedy prefixes this makes 1 row of 989 greedy off-format for digit but not for trie. The two "0.75" rows
-put p(`5`|`0.7`) ≈ 1.000: the digit scorer pays them as 0.7. Both are about 0.1% of rows, and on the
-released model the format outside the 11 levels has essentially no probability.
+p(`1`) at the first token is about 1e-9: the model never says 1.0. The logged logprobs are rounded to 1e-5.
 
 ## Next steps
 
-1. When the cache finishes: run `analyze_rollouts.py` on dev/train (per-problem accuracy vs confidence,
-   share of problems with mixed correctness).
-2. GPU smoke test of `train_frozen.py` (a few steps, small dev subset). Measure step time and memory, and
-   check that untrained trie metrics on test match the vLLM greedy confidences (mass near 1, greedy rarely
-   off the list).
+1. ~~Analyze the cache~~ (done: see "Fresh train rollouts" above).
+2. GPU smoke test of `train_frozen.py` (a few steps, small dev subset), with **both scorers on the untrained
+   checkpoint**. Check that trie and digit give the same level probabilities and eval metrics, and that both
+   match the vLLM greedy confidences (mass near 1, greedy rarely off the list). Measure step time and memory
+   for each. If they agree, make `--scorer digit` the default.
 3. Stage A runs: exact vs sampled, same data and steps, 3 seeds each, short LR sweep (LoRA, around 1e-5 to
    1e-4; the paper's full fine-tuning used 5e-6). Report dev and official-test greedy metrics.
 4. If step time is too slow (about 1 s per row with gradients through the prefix), consider LoRA on late

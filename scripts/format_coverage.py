@@ -8,7 +8,7 @@ For each cached rollout (cut through the final <confidence>, as train_frozen.py 
      ignoring everything after the digit (as digit_score does) loses nothing on the sampled path;
   3. from the raw top-64 log-probs over the confidence span (and the sampled log-probs after it), the
      probability at each position of leaving the one-decimal format along the sampled path:
-       first token not `0`/`1`; after `0`, not `.`; after `0.`, not a digit; after `0.d`, not `</`;
+       first token not `0`/`1`; after `0`, neither `.` nor `</` (the bare "0"); after `0.`, not a digit; after `0.d`, not `</`;
        after the digit, any tail other than the sampled `</confidence>` + end.
 Only well-formed rollouts with a parseable final <confidence> are rows the trainer uses; malformed ones
 are counted separately.
@@ -19,10 +19,10 @@ import numpy as np
 from transformers import AutoTokenizer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "rlcr-reward-conf-weighted-tt-scaling"))
-sys.path.insert(0, "/home/rrenaud/rlcr-exact/rlcr-reward-conf-weighted-tt-scaling")  # from a worktree, which lacks it
 from logprob_spans import cut_point, make_token_bytes
 
-LEVEL = re.compile(r"(0\.\d|1\.0)")
+# What digit_score counts as a level: 0.d, a bare "0", or "1" (with any ".0..." after it).
+LEVEL = re.compile(r"0|0\.\d|1(\.0*)?")
 
 
 def read_jsonl(path):
@@ -69,12 +69,14 @@ def main():
                     continue
                 s = re.findall(r"<confidence>(.*?)</confidence>", text, re.S)[-1]
                 strings[s] += 1
-                kinds["string is a level 0.0..1.0" if LEVEL.fullmatch(s) else "string is not a level"] += 1
+                kinds["string is a level" if LEVEL.fullmatch(s) else "string is not a level"] += 1
                 t = ids[cut:]
-                head_ok = len(t) >= 3 and t[0] in (zero, one) and t[1] == dot and t[2] in digits
-                exact = head_ok and t[3:3 + len(tail)] == tail and len(t) == 3 + len(tail) + 1 and t[-1] in ends
-                tails["exact `0|1 . d </confidence> <end>`" if exact else
-                      "level head, other tail" if head_ok else "head not `0|1 . d`"] += 1
+                bare = len(t) >= 2 and t[0] == zero and t[1] == tail[0]  # "0</confidence>"
+                head = 1 if bare else 3
+                head_ok = bare or (len(t) >= 3 and t[0] in (zero, one) and t[1] == dot and t[2] in digits)
+                exact = head_ok and t[head:head + len(tail)] == tail and len(t) == head + len(tail) + 1 and t[-1] in ends
+                tails["exact `0|1 . d </confidence> <end>` or `0 </confidence> <end>`" if exact else
+                      "level head, other tail" if head_ok else "head not a level"] += 1
                 if not exact:
                     tails["  e.g. " + repr(tok.convert_ids_to_tokens(t))[:120]] += 1
                     # How sure the model was of the step that left the format (sampled raw logprob).
@@ -97,7 +99,7 @@ def main():
                     off["first token: not `0` or `1`"].append(max(0.0, 1 - mass(first, (zero, one))))
                     off["first token: `1` (all of it counts as 1.0)"].append(mass(first, (one,)))
                 if t[:1] == [zero] and second is not None:
-                    off["after `0`: not `.`"].append(max(0.0, 1 - mass(second, (dot,))))
+                    off["after `0`: neither `.` nor `</`"].append(max(0.0, 1 - mass(second, (dot, tail[0]))))
                 if t[:2] == [zero, dot] and third is not None:
                     off["after `0.`: not a digit"].append(max(0.0, 1 - mass(third, digits)))
         print(f"== {path}\nproblems {n_q}  rollouts {total}  topk spans {len(topk)}")
