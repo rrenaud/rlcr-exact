@@ -51,7 +51,7 @@ for j, s in enumerate(trie_strings):
     trie_to_level[j, level_of(s)] = 1.0
 
 model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.bfloat16, attn_implementation="sdpa", device_map={"": 0}).eval()
-prefixes = [ids for _, ids, _ in rows]
+prefixes = [r[1] for r in rows]
 
 
 def timed(fn):
@@ -76,7 +76,7 @@ t_levels = t_logps.exp().float().cpu() @ trie_to_level
 d_levels = d_logps.exp().float().cpu()
 diff = (t_levels - d_levels).abs()
 t_greedy = [None if k is None else level_of(trie_strings[k]) for k in t_picks]
-vllm = [level_of(sampled[qid]) for qid, _, _ in rows]
+vllm = [level_of(sampled[r[0]]) for r in rows]
 report = dict(
     rows=len(rows), trie=trie_info, digit=digit_info,
     level_prob_abs_diff=dict(mean=float(diff.mean()), p99=float(diff.max(1).values.quantile(0.99)), max=float(diff.max())),

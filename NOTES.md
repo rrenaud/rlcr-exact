@@ -214,6 +214,27 @@ p(`1`) at the first token is about 1e-9: the model never says 1.0. The logged lo
   (model and data load, two 16-row evals, 3 steps): trie 63/71 s, digit 35/39 s (exact/sampled). The trainer
   logs step time every 10 steps, so clean per-step numbers come from the first real run.
 
+## Stage A sweep: protocol (fixed before the runs, 2026-10-15)
+
+Informed by `rewarding_doubt`'s sweeps (`docs/sweeps/README.md` there; reports 07, 08, 21, 23, 25):
+- **Fixed settings** (`train_frozen.py` defaults): digit scorer; Adam at a constant lr; one update per 32 rows
+  (4 problems x 8 rollouts). That is rewarding_doubt's cadence, whose best LoRA lr was 3e-4, with collapse at
+  1e-3 in 2/3 seeds. LoRA rank 4, alpha 4, on layers 14–27 (late half; rank 4 matched rank 8 with ~8x less
+  drift, and the late half matched full LoRA with a fifth of the drift). 500 steps = one pass over the 2,000
+  training problems (rewarding_doubt overfit after ~4 passes). Dev metrics every 100 steps on 500 fresh-dev
+  rows, answer drift on 200; official test (989 rows) at the end.
+- **Sweep:** lr in {1e-4, 3e-4, 1e-3} x objective in {exact, sampled}, seed 0. Each run is its own gpuq
+  submission, so other work streams can interleave.
+- **Eligibility** at the final step: mass >= 0.99; greedy off-list <= 1%; not collapsed (greedy confidence
+  sd >= 0.05 and greedy AUROC >= untrained - 0.02). Answer drift is reported and flagged above 1 nat per
+  completion (rewarding_doubt's Qwen tolerated ~2 nats, Llama ~0.8). It is a warning, not a gate, because
+  Stage A never regenerates answers.
+- **Selection:** per objective, the eligible lr with the lowest final dev greedy Brier. Within 0.005 Brier,
+  prefer the lower lr. AUROC is secondary. ECE is never used alone: a collapsed run can have excellent ECE.
+- **Headline:** seeds 1 and 2 at each objective's chosen lr. Report official-test greedy Brier / AUROC / ECE as
+  mean ± sd over 3 seeds, against the untrained checkpoint. A difference counts only if it exceeds the seed
+  spread. In-domain the target is discrimination (Brier, AUROC), since ECE is already ~0.04.
+
 ## Next steps
 
 1. ~~Analyze the cache~~ (done: see "Fresh train rollouts" above).

@@ -4,16 +4,25 @@ Each training row is a cached rollout of the released checkpoint, cut after "<co
 correctness label for its answer. The answer and analysis are fixed; only the distribution of the
 confidence completion is trained, over one of two candidate sets scored exactly:
 
-  --scorer trie:  114 strings x 2 end tokens, through a token trie (trie_score.py)
-  --scorer digit: the one-decimal levels 0.0 .. 1.0 plus a bare "0", from "0" "." appended to the prefix (digit_score.py);
-                  the tail after the digit is not scored
+  --scorer digit (default): the one-decimal levels 0.0 .. 1.0 plus a bare "0", from "0" "." appended to the
+                  prefix (digit_score.py); the tail after the digit is not scored
+  --scorer trie:  114 strings x 2 end tokens, through a token trie (trie_score.py); the reference
 
   exact:   maximize sum_j q_j R_j (the unlisted mass earns 0, as a malformed completion does in RLCR)
   sampled: GRPO on the confidence tokens alone: sample one completion per row from q (or "other"),
            advantage = reward minus its problem group's mean (no std division, as in RLCR), loss -A log q
 
+Defaults follow the rrenaud/rewarding_doubt sweeps (docs/sweeps): Adam at a constant 3e-4 with one update per
+32 rows, LoRA rank 4 (alpha = rank) on the late half of the layers, one epoch.
+
+Evaluation reports greedy and expected confidence. Greedy ECE uses the paper's 10 floor bins. Expected ECE uses
+bins centred on the levels (nearest 0.1), because an expected confidence of 0.79998 vs 0.8 otherwise flips a bin.
+It also reports answer drift: on the first --drift-rows dev rows, the summed log p_untrained - log p_current over
+the cached completion tokens before the confidence. The cache freezes the answers, so this is the warning that
+regenerated answers would change.
+
 usage: train_frozen.py --train ROLLOUTS --dev ROLLOUTS [--test ROLLOUTS] --objective exact|sampled
-                       [--scorer trie|digit] ...
+                       [--scorer digit|trie] ...
 """
 import argparse, collections, json, math, os, random, sys, time
 
@@ -37,7 +46,7 @@ LINEAR_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"
 
 
 def load_rows(path, token_bytes, max_prefix):
-    """Well-formed rollouts as (problem id, prefix token ids, correctness); counts what was dropped.
+    """Well-formed rollouts as (problem id, prefix token ids, correctness, prompt length); counts what was dropped.
 
     The prefix is the sampled token ids themselves (prompt_ids + completion_ids), cut through the <confidence>
     tag that opens the final confidence, so training scores exactly the tokens the policy produced.
@@ -52,7 +61,7 @@ def load_rows(path, token_bytes, max_prefix):
             prefix = q["prompt_ids"] + ids[:cut]
             if len(prefix) > max_prefix:
                 dropped["long"] += 1; continue
-            rows.append((q["id"], prefix, float(correct)))
+            rows.append((q["id"], prefix, float(correct), len(q["prompt_ids"])))
     return rows, dict(dropped)
 
 
@@ -74,30 +83,48 @@ def chunks(xs, n):
     return [xs[i: i + n] for i in range(0, len(xs), n)]
 
 
-def ece(c, y, bins=10):
-    b = np.minimum((c * bins).astype(int), bins - 1)
-    return float(sum((b == k).mean() * abs(y[b == k].mean() - c[b == k].mean()) for k in range(bins) if (b == k).any()))
+def ece(c, y, bins=10, centred=False):
+    """Expected calibration error. Floor bins [k/10, (k+1)/10) as in the paper, or, with centred=True, one bin per
+    level (nearest 0.1), for confidences that sit on or next to the levels."""
+    b = np.rint(c * bins).astype(int) if centred else np.minimum((c * bins).astype(int), bins - 1)
+    return float(sum((b == k).mean() * abs(y[b == k].mean() - c[b == k].mean()) for k in np.unique(b)))
+
+
+def completion_logprob(model, prefix, start):
+    """Summed log p of prefix[start:] given what precedes it (the cached reasoning and answer tokens)."""
+    base = model.get_base_model() if hasattr(model, "get_base_model") else model
+    ids = torch.tensor([prefix], device=next(base.parameters()).device)
+    hidden = base.model(input_ids=ids, use_cache=False).last_hidden_state[0, start - 1: -1]
+    logp = base.lm_head(hidden).float().log_softmax(-1)
+    return logp.gather(-1, ids[0, start:, None]).sum().item()
 
 
 @torch.no_grad()
-def evaluate(model, rows, values, score, batch):
+def evaluate(model, rows, values, score, batch, drift_rows=(), drift_base=None):
+    """Dev metrics; with drift_rows, also answer drift against drift_base (their untrained completion log-probs)."""
     model.eval()
     greedy, expected, mass, y = [], [], [], []
     for part in chunks(rows, batch):
-        logps, picks = score(model, [ids for _, ids, _ in part], greedy=True)
-        for q, k, (_, _, correct) in zip(logps.exp().cpu(), picks, part):
+        logps, picks = score(model, [r[1] for r in part], greedy=True)
+        for q, k, (_, _, correct, _) in zip(logps.exp().cpu(), picks, part):
             greedy.append(np.nan if k is None else values[k].item())
             mass.append(q.sum().item())
             expected.append((q * values).sum().item() / max(q.sum().item(), 1e-9))
             y.append(correct)
+    drift = [completion_logprob(model, ids, start) for _, ids, _, start in drift_rows]
     model.train()
     g, e, y = np.array(greedy), np.array(expected), np.array(y)
     ok = ~np.isnan(g)
     out = {"rows": len(y), "accuracy": y.mean(), "mass": float(np.mean(mass)), "greedy_off_list": float(1 - ok.mean())}
     for name, c, yy in (("greedy", g[ok], y[ok]), ("expected", e, y)):
-        out |= {f"{name}_mean": c.mean(), f"{name}_brier": np.mean((c - yy) ** 2), f"{name}_ece": ece(c, yy),
+        out |= {f"{name}_mean": c.mean(), f"{name}_sd": c.std(), f"{name}_brier": np.mean((c - yy) ** 2),
+                f"{name}_ece": ece(c, yy, centred=name == "expected"),
                 f"{name}_auroc": roc_auc_score(yy, c) if len(set(yy)) > 1 else float("nan")}
-    return {k: round(float(v), 4) for k, v in out.items()}
+    if drift_rows and drift_base is not None:
+        gap = np.array(drift_base) - np.array(drift)
+        out |= {"answer_drift_mean": gap.mean(), "answer_drift_max": gap.max()}
+    out = {k: round(float(v), 4) for k, v in out.items()}
+    return (out, drift) if drift_rows else out
 
 
 def main():
@@ -105,22 +132,23 @@ def main():
     ap.add_argument("--model", default="mehuldamani/big-math-digits-v2-brier-base-tabc")
     ap.add_argument("--train", required=True); ap.add_argument("--dev", required=True); ap.add_argument("--test")
     ap.add_argument("--objective", choices=["exact", "sampled"], required=True)
-    ap.add_argument("--scorer", choices=["trie", "digit"], default="trie")
+    ap.add_argument("--scorer", choices=["digit", "trie"], default="digit")
     ap.add_argument("--micro-batch", type=int, default=1, help="rows per forward/backward when training")
     ap.add_argument("--eval-batch", type=int, default=1, help="rows per no-grad forward (evaluation, sampling)")
-    ap.add_argument("--lr", type=float, default=1e-5)
-    ap.add_argument("--lora-r", type=int, default=16)
-    ap.add_argument("--lora-first-layer", type=int, default=0, help="adapt only layers >= this one")
-    ap.add_argument("--problems-per-step", type=int, default=4)
-    ap.add_argument("--steps", type=int, default=200)
-    ap.add_argument("--eval-every", type=int, default=50)
+    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--lora-r", type=int, default=4)
+    ap.add_argument("--lora-first-layer", type=int, default=14, help="adapt only layers >= this one (Qwen2.5-7B has 28)")
+    ap.add_argument("--problems-per-step", type=int, default=4, help="problems per update (x their rollouts each)")
+    ap.add_argument("--steps", type=int, default=500)
+    ap.add_argument("--eval-every", type=int, default=100)
     ap.add_argument("--dev-limit", type=int, default=None)
+    ap.add_argument("--drift-rows", type=int, default=200, help="dev rows for the answer-drift metric (0 = off)")
     ap.add_argument("--max-prefix", type=int, default=4608)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     args = ap.parse_args()
     random.seed(args.seed); torch.manual_seed(args.seed)
-    run_name = f"{args.objective}_s{args.seed}" if args.scorer == "trie" else f"{args.scorer}_{args.objective}_s{args.seed}"
+    run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_s{args.seed}"
     log_path = os.path.join(args.out, f"train_{run_name}.jsonl")
 
     def log(**rec):
@@ -153,7 +181,11 @@ def main():
     evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch)
     values_gpu = values.cuda()
 
-    log(event="eval", step=0, split="dev", **evaluate_on(dev))
+    # LoRA starts at zero, so step 0 is the untrained model: its completion log-probs are the drift baseline.
+    drift_rows = dev[: args.drift_rows]
+    metrics, drift_base = evaluate(model, dev, values, score, args.eval_batch, drift_rows)
+    log(event="eval", step=0, split="dev", **metrics)
+    evaluate_dev = lambda: evaluate(model, dev, values, score, args.eval_batch, drift_rows, drift_base)[0]
     order, t0 = [], time.time()
     for step in range(1, args.steps + 1):
         if len(order) < args.problems_per_step:
@@ -167,9 +199,9 @@ def main():
             if args.objective == "sampled":
                 draws = []
                 with torch.no_grad():
-                    qs = torch.cat([score(model, [ids for _, ids, _ in part]).exp().float()
+                    qs = torch.cat([score(model, [r[1] for r in part]).exp().float()
                                     for part in chunks(group, args.eval_batch)])
-                for q, (_, _, correct) in zip(qs, group):
+                for q, (_, _, correct, _) in zip(qs, group):
                     probs = torch.cat([q, (1 - q.sum()).clamp_min(0)[None]])
                     j = torch.multinomial(probs / probs.sum(), 1).item()
                     reward = 0.0 if j == len(q) else rlcr_reward(values_gpu[j], torch.tensor(correct, device=values_gpu.device)).item()
@@ -177,8 +209,8 @@ def main():
                 baseline = np.mean([r for _, r in draws])
             for start in range(0, len(group), args.micro_batch):
                 part = group[start: start + args.micro_batch]
-                logps = score(model, [ids for _, ids, _ in part])  # [rows, K]
-                y = torch.tensor([correct for _, _, correct in part], device=logps.device)
+                logps = score(model, [r[1] for r in part])  # [rows, K]
+                y = torch.tensor([r[2] for r in part], device=logps.device)
                 expected = exact_objective(logps, values_gpu, y[:, None])  # [rows]
                 if args.objective == "exact":
                     loss = -expected.sum()
@@ -194,7 +226,7 @@ def main():
         if step % 10 == 0:
             log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, **{k: round(v, 4) for k, v in stats.items()})
         if step % args.eval_every == 0 or step == args.steps:
-            log(event="eval", step=step, split="dev", **evaluate_on(dev))
+            log(event="eval", step=step, split="dev", **evaluate_dev())
     if test:
         log(event="eval", step=args.steps, split="test", **evaluate_on(test))
     model.save_pretrained(os.path.join(args.out, "checkpoints", run_name))
