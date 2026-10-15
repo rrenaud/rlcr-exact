@@ -190,6 +190,30 @@ mean per row and maximum over rows:
 
 p(`1`) at the first token is about 1e-9: the model never says 1.0. The logged logprobs are rounded to 1e-5.
 
+**GPU comparison on the untrained checkpoint** (`scripts/compare_scorers.py` via `scripts/smoke_scorers.sh`, gpuq
+`rlcr-math-frozen` / `run-20261015T230740Z-ce6e92f8f6`; 300 greedy official-test prefixes):
+
+| | trie | digit |
+|---|---|---|
+| level probabilities vs the other scorer | | mean abs diff 2e-5, p99 7e-4, max 0.027 |
+| mass on listed strings | 0.99998 | 1.0 |
+| greedy level = vLLM's generated confidence | 300/300 | 300/300 |
+| greedy Brier / ECE / AUROC | 0.173 / 0.068 / 0.733 | identical |
+| seconds per row (no grad) | 0.21 | **0.11** one row at a time; 0.18 in batches of 8 |
+| peak GB (no grad) | 14.8 | 14.6 (batch 1) / 17.6 (batch 8) |
+
+- Batching the digit scorer is slower because rows pad to the longest prefix (up to ~4.6k tokens). It needs
+  length-bucketed batches to pay off; until then use batch 1.
+- **Expected-confidence ECE is unstable with floor binning:** 0.071 (trie) vs 0.085 (digit) although level
+  probabilities agree to 2e-5. Most rows put ~all mass on 0.8, so the expected confidence is 0.79998 for one
+  scorer and 0.8 for the other, and `floor(10 c)` puts them in different bins. Expected-confidence AUROC
+  also moves (0.724 vs 0.739) through near-ties. Greedy metrics, which sit exactly on the levels, are
+  unaffected. For the expected readout, bin by nearest level (`round(10 c)`) instead.
+- Training path: 3 steps (1 problem x 8 rollouts) for each scorer x objective all ran and saved adapters,
+  with no errors or OOM. Peak device memory was 20.3 GB, from digit with `--micro-batch 4`. Wall time per process
+  (model and data load, two 16-row evals, 3 steps): trie 63/71 s, digit 35/39 s (exact/sampled). The trainer
+  logs step time every 10 steps, so clean per-step numbers come from the first real run.
+
 ## Next steps
 
 1. ~~Analyze the cache~~ (done: see "Fresh train rollouts" above).
