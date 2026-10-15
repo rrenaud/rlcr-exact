@@ -5,7 +5,7 @@ correctness label for its answer. The answer and analysis are fixed; only the di
 confidence completion is trained, over one of two candidate sets scored exactly:
 
   --scorer trie:  114 strings x 2 end tokens, through a token trie (trie_score.py)
-  --scorer digit: the 11 one-decimal levels 0.0 .. 1.0, from "0" "." appended to the prefix (digit_score.py);
+  --scorer digit: the one-decimal levels 0.0 .. 1.0 plus a bare "0", from "0" "." appended to the prefix (digit_score.py);
                   the tail after the digit is not scored
 
   exact:   maximize sum_j q_j R_j (the unlisted mass earns 0, as a malformed completion does in RLCR)
