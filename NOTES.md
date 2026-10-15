@@ -84,8 +84,9 @@ own repos; they are git-ignored here and not covered. `data/` is ignored too: re
   `rollout_vllm.py` at `0a690f0`; each row now also carries `policy["infra_rev"]` (git rev, `-dirty` if
   modified). **New rollouts use it** (`scripts/cache_rollouts.py` stays only as the producer of the current
   cache). My call maps to `rollout_vllm.py --rlcr ~/rlcr_platt/RLCR --task math --data SPLIT.jsonl --k 1
-  --temperature 0 --util 0.9 --out FILE --resume`. **Without `--resume` it deletes an existing OUT**, so
-  always pass `--resume` or a fresh path. Its check (gpuq `run-20261015T224646Z-44b2ab4027`): same fields as
+  --temperature 0 --util 0.9 --out FILE`. Since `8df33a3` it never deletes OUT. It appends, skipping
+  ids already there, and refuses to start if existing rows came from different settings (base, adapter,
+  seed, temperature, k). `--resume` is a no-op. Its check (gpuq `run-20261015T224646Z-44b2ab4027`): same fields as
   my cache. Only 2/32 greedy math outputs are token-identical to mine, every split a near-tie under bf16
   batch-shape nondeterminism (their chunk 24/8 vs my 250), and `correct` agrees on 29/32. So compare
   aggregates across runs, not individual traces (or match `--chunk` and the question set). Neither session
