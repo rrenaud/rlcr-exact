@@ -90,36 +90,42 @@ def body(chosen, show_small, text, split, smooth):
         st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
 
     evals = pd.DataFrame([dict(run=r["label"], **e) for r in sel for e in r["evals"] if e["split"] == split])
-    st.subheader(f"Eval curves ({split})")
-    metrics = st.multiselect("Eval metrics", [m for m in DEV_METRICS if m in evals.columns],
-                             default=[m for m in DEV_METRICS[:6] if m in evals.columns], key="evm")
-    st.markdown("**Mean confidence, overall and by correctness** (solid: all rows; dashed: correct; dotted: wrong; "
-                "derived from mean, sd, Brier and accuracy when a log does not record them)")
-    conf = st.radio("Readout", ["greedy", "expected"], horizontal=True, key="conf")
-    # Older logs have no per-correctness means; recover them from the aggregates (exact: y is 0/1, so
-    # Brier = E[c^2] - 2 a m1 + a with E[c^2] = sd^2 + mean^2; greedy stats skip off-list rows, off by greedy_off_list).
-    if all(c in evals.columns for c in (f"{conf}_mean", f"{conf}_sd", f"{conf}_brier", "accuracy")):
-        a, mu, sd, b = (evals[c] for c in ("accuracy", f"{conf}_mean", f"{conf}_sd", f"{conf}_brier"))
-        m1 = (sd ** 2 + mu ** 2 + a - b) / (2 * a)
-        m0 = (mu - a * m1) / (1 - a)
-        for col, derived in ((f"{conf}_mean_correct", m1), (f"{conf}_mean_wrong", m0)):
-            evals[col] = evals[col].fillna(derived) if col in evals.columns else derived
-    parts = [(f"{conf}_mean", "all"), (f"{conf}_mean_correct", "correct"), (f"{conf}_mean_wrong", "wrong")]
-    long = pd.concat([evals[["run", "step", c]].rename(columns={c: "confidence"}).assign(rows=name)
-                      for c, name in parts if c in evals.columns], ignore_index=True).dropna()
-    if not long.empty:
-        acc = evals.groupby("run")["accuracy"].first() if "accuracy" in evals.columns else None
-        fig = px.line(long, x="step", y="confidence", color="run", line_dash="rows", markers=True, height=420,
-                      line_dash_map={"all": "solid", "correct": "dash", "wrong": "dot"})
-        if acc is not None and acc.nunique() == 1:  # one shared accuracy: draw it as the calibration target
-            fig.add_hline(y=float(acc.iloc[0]), line_color="gray", annotation_text=f"accuracy {acc.iloc[0]:.3f}")
-        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), yaxis_range=[0, 1])
-        st.plotly_chart(fig, use_container_width=True, key="conf-by-y")
-    cols = st.columns(2)
-    for i, m in enumerate(metrics):
-        fig = px.line(evals, x="step", y=m, color="run", markers=True, height=330)
-        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), title=m)
-        cols[i % 2].plotly_chart(fig, use_container_width=True, key=f"ev-{m}")
+    if evals.empty:
+        st.subheader(f"Eval curves ({split})")
+        st.info(f"No {split}-split evals in the selected runs. Train-split evals exist only for overfit runs "
+                "(tick \"Include smoke/overfit runs\"); test is evaluated once, at the end of a run. "
+                "The training log itself is plotted below.")
+    else:
+        st.subheader(f"Eval curves ({split})")
+        metrics = st.multiselect("Eval metrics", [m for m in DEV_METRICS if m in evals.columns],
+                                 default=[m for m in DEV_METRICS[:6] if m in evals.columns], key="evm")
+        st.markdown("**Mean confidence, overall and by correctness** (solid: all rows; dashed: correct; dotted: wrong; "
+                    "derived from mean, sd, Brier and accuracy when a log does not record them)")
+        conf = st.radio("Readout", ["greedy", "expected"], horizontal=True, key="conf")
+        # Older logs have no per-correctness means; recover them from the aggregates (exact: y is 0/1, so
+        # Brier = E[c^2] - 2 a m1 + a with E[c^2] = sd^2 + mean^2; greedy stats skip off-list rows, off by greedy_off_list).
+        if all(c in evals.columns for c in (f"{conf}_mean", f"{conf}_sd", f"{conf}_brier", "accuracy")):
+            a, mu, sd, b = (evals[c] for c in ("accuracy", f"{conf}_mean", f"{conf}_sd", f"{conf}_brier"))
+            m1 = (sd ** 2 + mu ** 2 + a - b) / (2 * a)
+            m0 = (mu - a * m1) / (1 - a)
+            for col, derived in ((f"{conf}_mean_correct", m1), (f"{conf}_mean_wrong", m0)):
+                evals[col] = evals[col].fillna(derived) if col in evals.columns else derived
+        parts = [(f"{conf}_mean", "all"), (f"{conf}_mean_correct", "correct"), (f"{conf}_mean_wrong", "wrong")]
+        long = pd.concat([evals[["run", "step", c]].rename(columns={c: "confidence"}).assign(rows=name)
+                          for c, name in parts if c in evals.columns], ignore_index=True).dropna()
+        if not long.empty:
+            acc = evals.groupby("run")["accuracy"].first() if "accuracy" in evals.columns else None
+            fig = px.line(long, x="step", y="confidence", color="run", line_dash="rows", markers=True, height=420,
+                          line_dash_map={"all": "solid", "correct": "dash", "wrong": "dot"})
+            if acc is not None and acc.nunique() == 1:  # one shared accuracy: draw it as the calibration target
+                fig.add_hline(y=float(acc.iloc[0]), line_color="gray", annotation_text=f"accuracy {acc.iloc[0]:.3f}")
+            fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), yaxis_range=[0, 1])
+            st.plotly_chart(fig, use_container_width=True, key="conf-by-y")
+        cols = st.columns(2)
+        for i, m in enumerate(metrics):
+            fig = px.line(evals, x="step", y=m, color="run", markers=True, height=330)
+            fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), title=m)
+            cols[i % 2].plotly_chart(fig, use_container_width=True, key=f"ev-{m}")
 
     train = pd.DataFrame([dict(run=r["label"], **t) for r in sel for t in r["train"]])
     if not train.empty:
@@ -143,7 +149,7 @@ with st.sidebar:
     chosen = st.multiselect("Experiments", experiments, default=[e for e in experiments if "rlvr-frozen" in e] or experiments)
     show_small = st.checkbox("Include smoke/overfit runs", value=False)
     text = st.text_input("Label filter (substring)", "")
-    split = st.radio("Eval split", ["dev", "train", "test"], horizontal=True)
+    split = st.radio("Eval split (dev every 100 steps; test at the end)", ["dev", "train", "test"], horizontal=True)
     smooth = st.slider("Train-curve smoothing (log points)", 1, 20, 5)
     st.caption("Refreshes every 60 s.")
 body(chosen, show_small, text, split, smooth)
