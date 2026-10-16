@@ -367,6 +367,51 @@ it, and their default micro-batch is the whole group.
   so that all six runs use the packed code. Its dev evals at steps 0/100 are in its log. It ran under
   experiment `rlcr-math-frozen` because sweep_chain.sh hard-coded that name, now fixed.
 
+## HotpotQA Stage A from the RLCR checkpoint: seed 0 sweep (2026-10-16)
+
+Six packed runs (`rlcr-hotpot-frozen`), 500 steps, W=1, cached reference. Dev (500 rows, EM labels), final step;
+untrained: greedy Brier 0.1848, ECE 0.039, AUROC 0.794.
+
+| objective | lr | greedy Brier | ECE | AUROC | expected Brier | Brier (F1) | drift (nats) |
+|---|---|---|---|---|---|---|---|
+| exact | 1e-4 | 0.1833 | 0.028 | 0.793 | 0.1827 | 0.1751 | 0.004 |
+| exact | 3e-4 | 0.1851 | 0.030 | 0.789 | 0.1829 | 0.1761 | 0.050 |
+| exact | 1e-3 | 0.1824 | 0.039 | 0.795 | 0.1818 | 0.1656 | 3.34 |
+| sampled | 1e-4 | 0.1869 | 0.035 | 0.784 | 0.1850 | 0.1757 | 0.002 |
+| sampled | 3e-4 | 0.1892 | 0.066 | 0.791 | 0.1892 | 0.1792 | 0.039 |
+| sampled | 1e-3 | 0.1944 | 0.066 | 0.776 | 0.1935 | 0.1872 | 3.53 |
+
+- The rule selects 1e-4 for both (exact: 1e-3 is within 0.005, lower lr preferred). Test at 1e-4: exact Brier
+  0.192 / AUROC 0.785 / ECE 0.076; sampled 0.194 / 0.780 / 0.082; untrained 0.196 / 0.778 / 0.084.
+- Exact is ahead of sampled at every lr, but nothing beats untrained by more than the noise (Brier SE about
+  0.007 at 500 rows). The released model was trained on this reward and data, so there is little left.
+- At 1e-3 answer drift reaches 3.3-3.5 nats despite W=1. The eligibility rule does not check drift; treat 1e-3
+  as out of bounds in practice.
+
+## Uncalibrated start: RLVR-hotpot (2026-10-16)
+
+RLCR-hotpot was trained from Qwen2.5-7B base (`configs/Qwen-7B/hotpot/RLCR.yaml`). Probe under tabc_long
+(`probe_uncalibrated.sh`, `rlcr-hotpot-uncal`), 300 dev greedy and 100x8 train at T=0.7:
+
+| model | split | format ok | accuracy | mean conf | Brier | ECE | AUROC |
+|---|---|---|---|---|---|---|---|
+| RLVR-hotpot (`hotpot-v2-correctness-7b`) | dev | 0.83 | 0.44 | 0.96 | 0.52 | 0.52 | 0.54 |
+| RLVR-hotpot | train | 0.72 | 0.40 | 0.95 | 0.54 | 0.55 | 0.56 |
+| Qwen2.5-7B base | dev | 0.93 | 0.30 | 0.85 | 0.52 | 0.55 | 0.63 |
+| Qwen2.5-7B base | train | 0.70 | 0.20 | 0.80 | 0.54 | 0.60 | 0.63 |
+
+- Chosen start: **RLVR-hotpot**. Same data and the same accuracy as RLCR-hotpot, trained with the GEN prompt (no
+  confidence), so the gap to RLCR is calibration alone. Nearly constant 0.95-1.0 confidence. The base model is
+  less accurate and states off-list forms (`" 1 "`, `"0.9"`, none) more often.
+- Full cache `rlcr-hotpot-rlvr-cache/run-20261016T073943Z-04bf759137` (same splits as the RLCR cache). Fresh
+  dev: format ok 0.78, accuracy 0.43, Brier 0.53, AUROC 0.55. Paper test: Brier 0.60, AUROC 0.52.
+- Smoke `rlcr-hotpot-rlvr-frozen/run-20261016T144115Z-73d8ea5b8b` (ref cache, scorer check, 3 steps each). Scorer
+  agrees with vLLM greedy on 95.4% of dev rows. Mass on the list starts at 0.85, mostly `" 1 "`, and rises to 0.99
+  after 3 exact steps. Greedy confidence sd starts at 0.055, just above the 0.05 eligibility floor.
+- Caveat: RLVR never learned to reason about uncertainty in its analysis, and frozen training reads only the
+  cached text. A low AUROC ceiling here points at Stage B.
+- Queue: the same six-config sweep from RLVR (`TASK=hotpot-rlvr`), then seeds 1-2 at 1e-4 from the RLCR checkpoint.
+
 ## Next steps
 
 1. ~~Analyze the cache~~ (done: see "Fresh train rollouts" above).
