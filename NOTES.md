@@ -321,6 +321,33 @@ at the position that writes the decimal digit (raw logprobs, temperature 1):
   cancelled at step ~420 of 500. Its dev greedy Brier / AUROC were 0.188 / 0.713 at step 0 and 0.1895 /
   0.718 at step 400, and drift was ~30 nats per completion: the null result, kept in its log.
 
+## HotpotQA Stage A: grader, smoke results, sweep (2026-10-16)
+
+- **Grading.** RLCR grades HotpotQA by exact match after `normalize_answer`, in training (`accuracy_reward`)
+  and in its HotpotQA eval (`confidence_verifier`); only TriviaQA / SimpleQA / CommonsenseQA / GPQA use the Llama
+  judge. On our caches, F1 >= 0.5 relabels EM-wrong -> right on 13.2% (test), 11.1% (dev) and 9.7% (train) of
+  rows, and never the reverse (e.g. "14 August" for "14 August 1947", "Herbert Ross" for "Herbert David Ross").
+  The released confidence tracks F1-correctness better: dev AUROC 0.818 vs 0.795 under EM. Other evidence:
+  rewarding_doubt `docs/grading.md` (EM rejects ~5% of correct TriviaQA answers, F1 > 0.5 accepts ~1% wrong
+  ones; it chose F1); conf-vote `JUDGE_RESULTS.md` on branch `judge` (Haiku: 71% of EM-wrong overlapping answers
+  are acceptable; Qwen2.5-7B-Instruct judge at θ=0.9 precision 97%, recall 53%).
+  **Decision (user): train and select on RLCR's exact-match labels.** Every eval also reports metrics against
+  F1 >= 0.5 (`*_f1`; `src/rlcr_exact/grading.py`, normalization verbatim from RLCR). Watch for EM-metric gains
+  without F1 gains, which would be grader quirks being learned.
+- **Smoke** (gpuq `rlcr-hotpot-frozen` / `run-20261016T011428Z-e9054eafab`, 63 min, peak 17.0 GB):
+  - Reference top-64 cache of the 15,997 training rows (3.98M positions, 1.5 GiB): `ref_topk_train/` in that
+    run directory, 0.19 s per row.
+  - The hotpot scorer's greedy confidence equals vLLM's on 95.6% of 499 test rows. The other ~5% are exact
+    ties: in vLLM's own logprobs 5.0% of rows have a top-2 gap under 0.02 nats in the confidence (bf16 logits).
+    Mass on the 62 candidates is mean 0.9985 (min 0.953), off-list 0%. Scorer metrics equal vLLM's: Brier
+    0.195 vs 0.196, AUROC 0.778.
+  - 3 steps per objective with `--ref-topk` ran and saved adapters.
+  - **The answer-KL metric has a bf16 floor of ~0.2 nats per completion** (0.198 at step 0, 0.0008/token), from
+    the trie forward vs the plain reference forward. Read drift as the change from step 0.
+- **Sweep:** same protocol as above (fixed before the runs). It uses `--scorer hotpot`, W = 1 with the cached
+  reference, and selects on dev greedy Brier (EM labels). The lr grid is {1e-4, 3e-4, 1e-3} x {exact, sampled},
+  seed 0, then seeds 1-2 at each objective's pick.
+
 ## Next steps
 
 1. ~~Analyze the cache~~ (done: see "Fresh train rollouts" above).

@@ -25,8 +25,8 @@ def test_centred_ece_is_stable_at_levels():
     assert abs(ece(levels, yy) - ece(levels, yy, centred=True)) < 1e-9
 
 
-ROWS = [Row("a", [11, 12, 13, 14, 15, 16], 1.0, 2, 0), Row("b", [21, 22, 23, 24], 0.0, 1, 0),
-        Row("a", [31, 32, 33, 34, 35, 36, 37], 1.0, 3, 1)]
+ROWS = [Row("a", [11, 12, 13, 14, 15, 16], 1.0, 2, 0, 1.0), Row("b", [21, 22, 23, 24], 0.0, 1, 0, 1.0),
+        Row("a", [31, 32, 33, 34, 35, 36, 37], 1.0, 3, 1, 0.0)]
 score = lambda m, prefixes, greedy=False, hidden=False: level_logps(m, prefixes, IDS, greedy, hidden)
 
 

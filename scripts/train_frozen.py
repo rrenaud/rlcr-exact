@@ -44,6 +44,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from rlcr_exact.confidence import exact_objective, hotpot_candidates, make_candidates, rlcr_reward
 from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
+from rlcr_exact.grading import f1_correct
 from rlcr_exact.trie_score import candidate_logps
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "rlcr-reward-conf-weighted-tt-scaling"))
@@ -54,7 +55,8 @@ from logprob_spans import cut_point, make_token_bytes
 LINEAR_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 # A training row: one cached rollout, cut after "<confidence>". j is the output's index within its question.
-Row = collections.namedtuple("Row", "qid prefix correct start j")
+# correct is RLCR's label (exact match for HotpotQA), which training uses; correct_f1 (F1 >= 0.5) is reported.
+Row = collections.namedtuple("Row", "qid prefix correct start j correct_f1")
 
 
 def load_rows(path, token_bytes, max_prefix):
@@ -74,7 +76,7 @@ def load_rows(path, token_bytes, max_prefix):
             prefix = q["prompt_ids"] + ids[:cut]
             if len(prefix) > max_prefix:
                 dropped["long"] += 1; continue
-            rows.append(Row(q["id"], prefix, float(correct), len(q["prompt_ids"]), j))
+            rows.append(Row(q["id"], prefix, float(correct), len(q["prompt_ids"]), j, f1_correct(text, q["answer"])))
     return rows, dict(dropped)
 
 
@@ -187,7 +189,7 @@ def answer_kl(model, states, rows, ref_topk=None):
 def evaluate(model, rows, values, score, batch, drift_rows=()):
     """Dev metrics; with drift_rows, also their answer KL (per completion and per token)."""
     model.eval()
-    greedy, expected, mass, y = [], [], [], []
+    greedy, expected, mass, y, y_f1 = [], [], [], [], []
     for part in chunks(rows, batch):
         logps, picks = score(model, [r[1] for r in part], greedy=True)
         for q, k, row in zip(logps.exp().cpu(), picks, part):
@@ -195,16 +197,20 @@ def evaluate(model, rows, values, score, batch, drift_rows=()):
             mass.append(q.sum().item())
             expected.append((q * values).sum().item() / max(q.sum().item(), 1e-9))
             y.append(row.correct)
+            y_f1.append(row.correct_f1)
     kls = [answer_kl(model, score(model, [r[1]], hidden=True)[1], [r]).item() for r in drift_rows]
     tokens = sum(len(r.prefix) - r.start for r in drift_rows)
     model.train()
-    g, e, y = np.array(greedy), np.array(expected), np.array(y)
+    g, e, y, y_f1 = np.array(greedy), np.array(expected), np.array(y), np.array(y_f1)
     ok = ~np.isnan(g)
-    out = {"rows": len(y), "accuracy": y.mean(), "mass": float(np.mean(mass)), "greedy_off_list": float(1 - ok.mean())}
-    for name, c, yy in (("greedy", g[ok], y[ok]), ("expected", e, y)):
-        out |= {f"{name}_mean": c.mean(), f"{name}_sd": c.std(), f"{name}_brier": np.mean((c - yy) ** 2),
-                f"{name}_ece": ece(c, yy, centred=name == "expected"),
-                f"{name}_auroc": roc_auc_score(yy, c) if len(set(yy)) > 1 else float("nan")}
+    out = {"rows": len(y), "accuracy": y.mean(), "accuracy_f1": y_f1.mean(), "mass": float(np.mean(mass)),
+           "greedy_off_list": float(1 - ok.mean())}
+    for name, c, yy, yf in (("greedy", g[ok], y[ok], y_f1[ok]), ("expected", e, y, y_f1)):
+        out |= {f"{name}_mean": c.mean(), f"{name}_sd": c.std()}
+        for suffix, labels in (("", yy), ("_f1", yf)):  # RLCR's labels, then F1 >= 0.5
+            out |= {f"{name}_brier{suffix}": np.mean((c - labels) ** 2),
+                    f"{name}_ece{suffix}": ece(c, labels, centred=name == "expected"),
+                    f"{name}_auroc{suffix}": roc_auc_score(labels, c) if len(set(labels)) > 1 else float("nan")}
     if drift_rows:
         out |= {"answer_kl": np.mean(kls), "answer_kl_max": np.max(kls), "answer_kl_token": sum(kls) / tokens}
     return {k: round(float(v), 4) for k, v in out.items()}
