@@ -28,16 +28,28 @@ def load(path, mtime):  # mtime keys the cache, so a growing log is re-read
             [r for r in rows if r["event"] == "grad"])
 
 
-def label(args, path):
-    parts = [args.get("objective", "?"), f"lr{args.get('lr', 0):g}"]
+def config(args):  # the settings that tell runs apart, as short keys (table columns and plot names)
+    c = dict(obj=args.get("objective", "?"), lr=f"{args.get('lr', 0):g}")
     for key, tag in (("support_floor", "F"), ("answer_kl", "W"), ("train_problems", "overfit")):
-        if args.get(key):
-            parts.append(f"{tag}{args[key]:g}")
-    if args.get("warmup_steps") or args.get("decay_frac"):
-        parts.append(f"wsd{args.get('warmup_steps', 0)}-{args.get('decay_frac', 0):g}")
-    parts.append(f"s{args.get('seed', 0)}")
-    run = os.path.basename(os.path.dirname(path))
-    return f"{' '.join(parts)} [{run[4:19]}]"
+        c[tag] = f"{args[key]:g}" if args.get(key) else "-"
+    c["wsd"] = f"{args.get('warmup_steps', 0)}/{args.get('decay_frac', 0):g}" if args.get("warmup_steps") or args.get("decay_frac") else "-"
+    c["seed"] = str(args.get("seed", 0))
+    return c
+
+
+def label(args, path):  # full name, for the text filter
+    return " ".join(f"{k}={v}" for k, v in config(args).items() if v != "-")
+
+
+def name_runs(sel):
+    """Plot name per run: only the config keys that vary among the selected runs; '#2' etc. for exact repeats."""
+    keys = [k for k in config({}) if len({r["config"][k] for r in sel}) > 1] or ["obj"]
+    seen = {}
+    for r in sel:
+        base = " ".join(f"{k}={r['config'][k]}" for k in keys)
+        seen[base] = seen.get(base, 0) + 1
+        r["name"] = base if seen[base] == 1 else f"{base} #{seen[base]}"
+    return keys
 
 
 def runs():
@@ -45,7 +57,7 @@ def runs():
     for path in sorted(glob.glob(f"{ROOT}/rlcr-*/run-*/train_*.jsonl")):
         args, evals, train, grad = load(path, os.path.getmtime(path))
         out.append(dict(path=path, experiment=path.split("/")[-3], args=args, evals=evals, train=train, grad=grad,
-                        label=label(args, path)))
+                        label=label(args, path), config=config(args), started=os.path.basename(os.path.dirname(path))[4:19]))
     return out
 
 
@@ -61,6 +73,8 @@ def body(chosen, show_small, text, split, smooth):
     all_runs = runs()
     sel = [r for r in all_runs if r["experiment"] in chosen and text in r["label"]
            and (show_small or (r["args"].get("steps", 0) >= 100 and not r["args"].get("train_problems")))]
+
+    keys = name_runs(sel)
 
     st.subheader("Queue")
     st.code(queue() or "(empty)")
@@ -79,7 +93,7 @@ def body(chosen, show_small, text, split, smooth):
             state = "cancelled" if o.get("cancelled") else "done" if o.get("command_exit_code") == 0 else f"exit {o.get('command_exit_code')}"
         else:
             state = "running"
-        row = dict(run=r["label"], experiment=r["experiment"], state=state, step=f"{done}/{steps}",
+        row = dict(name=r["name"], **r["config"], experiment=r["experiment"], started=r["started"], state=state, step=f"{done}/{steps}",
                    eta_min=round(rate * (steps - done) / 60) if state == "running" and done else None)
         if dev:
             for m in ("greedy_brier", "greedy_auroc", "greedy_ece", "greedy_mean", "answer_kl"):
@@ -88,9 +102,11 @@ def body(chosen, show_small, text, split, smooth):
                     row[f"{m} now"] = dev[-1][m]
         table.append(row)
     if table:
+        st.caption(f"Plots name each run by the settings that differ among the selected runs: {', '.join(keys)}. "
+                   "F = support floor beta, W = answer-KL weight, wsd = warmup steps/decay fraction.")
         st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
 
-    evals = pd.DataFrame([dict(run=r["label"], **e) for r in sel for e in r["evals"] if e["split"] == split])
+    evals = pd.DataFrame([dict(run=r["name"], **e) for r in sel for e in r["evals"] if e["split"] == split])
     if evals.empty:
         st.subheader(f"Eval curves ({split})")
         st.info(f"No {split}-split evals in the selected runs. Train-split evals exist only for overfit runs "
@@ -128,7 +144,7 @@ def body(chosen, show_small, text, split, smooth):
             fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), title=m)
             cols[i % 2].plotly_chart(fig, use_container_width=True, key=f"ev-{m}")
 
-    train = pd.DataFrame([dict(run=r["label"], **t) for r in sel for t in r["train"]])
+    train = pd.DataFrame([dict(run=r["name"], **t) for r in sel for t in r["train"]])
     if not train.empty:
         st.subheader("Training curves (rolling mean)")
         tm = st.multiselect("Train metrics", [m for m in TRAIN_METRICS if m in train.columns],
@@ -145,7 +161,7 @@ def body(chosen, show_small, text, split, smooth):
             fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), title=m)
             cols[i % 2].plotly_chart(fig, use_container_width=True, key=f"tr-{m}")
 
-    grad = pd.DataFrame([dict(run=r["label"], **g) for r in sel for g in r["grad"]])
+    grad = pd.DataFrame([dict(run=r["name"], **g) for r in sel for g in r["grad"]])
     if not grad.empty:
         st.subheader("Gradient decomposition (separate backward per loss term)")
         st.caption("norm_*: gradient norm of each weighted term of the step's mean loss (objective, floor = beta*CE, "
