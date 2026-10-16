@@ -45,7 +45,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from rlcr_exact.confidence import exact_objective, hotpot_candidates, make_candidates, rlcr_reward
 from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
 from rlcr_exact.grading import f1_correct
-from rlcr_exact.trie_score import candidate_logps
+from rlcr_exact.trie_score import packed_candidate_logps
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "rlcr-reward-conf-weighted-tt-scaling"))
 from logprob_spans import cut_point, make_token_bytes
@@ -92,11 +92,8 @@ def make_scorer(name, tok):
     cands = hotpot_candidates(tok) if name == "hotpot" else make_candidates(tok)
 
     def score(model, prefixes, greedy=False, hidden=False):
-        outs = [candidate_logps(model, p, cands.trie, greedy=greedy, hidden=hidden) for p in prefixes]
-        if not (greedy or hidden):
-            return torch.stack(outs)
-        cols = list(zip(*outs))
-        return (torch.stack(cols[0]), *([list(cols[1])] if greedy else []), *([list(cols[-1])] if hidden else []))
+        # One packed forward: the rows' common start (a question's prompt, shared by its rollouts) runs once.
+        return packed_candidate_logps(model, prefixes, cands.trie, greedy=greedy, hidden=hidden)
     return cands.values, score, dict(candidates=len(cands.strings), trie_nodes=len(cands.trie.tokens))
 
 
@@ -222,7 +219,9 @@ def main():
     ap.add_argument("--train", required=True); ap.add_argument("--dev", required=True); ap.add_argument("--test")
     ap.add_argument("--objective", choices=["exact", "sampled"], required=True)
     ap.add_argument("--scorer", choices=["digit", "trie", "hotpot"], default="digit")
-    ap.add_argument("--micro-batch", type=int, default=1, help="rows per forward/backward when training")
+    ap.add_argument("--micro-batch", type=int, default=None,
+                    help="rows per forward/backward when training (default: a whole problem group for the trie "
+                         "scorers, whose rows share the prompt and are packed into one forward; 1 for digit)")
     ap.add_argument("--eval-batch", type=int, default=1, help="rows per no-grad forward (evaluation, sampling)")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--lora-r", type=int, default=4)
@@ -238,6 +237,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     args = ap.parse_args()
+    packed = args.scorer in ("trie", "hotpot")
     args.model = args.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if args.scorer == "hotpot"
                                 else "mehuldamani/big-math-digits-v2-brier-base-tabc")
     random.seed(args.seed); torch.manual_seed(args.seed)
@@ -298,15 +298,16 @@ def main():
                 draws = []
                 with torch.no_grad():
                     qs = torch.cat([score(model, [r[1] for r in part]).exp().float()
-                                    for part in chunks(group, args.eval_batch)])
+                                    for part in chunks(group, len(group) if packed else args.eval_batch)])
                 for q, row in zip(qs, group):
                     probs = torch.cat([q, (1 - q.sum()).clamp_min(0)[None]])
                     j = torch.multinomial(probs / probs.sum(), 1).item()
                     reward = 0.0 if j == len(q) else rlcr_reward(values_gpu[j], torch.tensor(row.correct, device=values_gpu.device)).item()
                     draws.append((j, reward))
                 baseline = np.mean([r for _, r in draws])
-            for start in range(0, len(group), args.micro_batch):
-                part = group[start: start + args.micro_batch]
+            micro = args.micro_batch or (len(group) if packed else 1)
+            for start in range(0, len(group), micro):
+                part = group[start: start + micro]
                 if args.answer_kl:
                     logps, states = score(model, [r[1] for r in part], hidden=True)  # [rows, K], hidden states
                 else:

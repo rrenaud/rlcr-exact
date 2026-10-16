@@ -57,3 +57,35 @@ def test_greedy_matches_generate():
     off = (out[2] + 1) % 64
     _, k = candidate_logps(model, PREFIX, build_trie([out[:2] + [off, 1], out[:2] + [off, 2]]), greedy=True)
     assert k is None
+
+
+def test_packed_matches_per_row():
+    from rlcr_exact.trie_score import packed_candidate_logps
+    prefixes = [PREFIX + [40, 41], PREFIX + [42], PREFIX + [43, 44, 45], PREFIX + [40, 41]]  # shared prompt, own suffixes
+    trie = build_trie(CANDS)
+    model = tiny_model(seed=2)
+    with torch.no_grad():
+        got, picks, states = packed_candidate_logps(model, prefixes, trie, greedy=True, hidden=True)
+        for b, p in enumerate(prefixes):
+            want, pick, want_states = candidate_logps(model, p, trie, greedy=True, hidden=True)
+            assert torch.allclose(got[b], want, atol=1e-4), (b, got[b], want)
+            assert picks[b] == pick
+            assert torch.allclose(states[b], want_states[: len(p)], atol=1e-4)
+        # No common start at all also works (the shared part is empty).
+        mixed = [[1, 2, 3], [4, 5], [6, 7, 8, 9]]
+        assert torch.allclose(packed_candidate_logps(model, mixed, trie),
+                              torch.stack([candidate_logps(model, p, trie) for p in mixed]), atol=1e-4)
+
+
+def test_packed_gradients_match_per_row():
+    from rlcr_exact.trie_score import packed_candidate_logps
+    prefixes = [PREFIX + [40, 41], PREFIX + [42], PREFIX + [43, 44, 45]]
+    trie = build_trie(CANDS)
+    w = torch.randn(len(prefixes), len(CANDS))
+    def grads(packed):
+        model = get_peft_model(tiny_model(), LoraConfig(r=4, target_modules=["q_proj", "v_proj", "down_proj"], init_lora_weights=False))
+        logps = packed_candidate_logps(model, prefixes, trie) if packed else torch.stack([candidate_logps(model, p, trie) for p in prefixes])
+        (logps * w).sum().backward()
+        return {n: p.grad.clone() for n, p in model.named_parameters() if p.requires_grad}
+    a, b = grads(True), grads(False)
+    assert all(torch.allclose(a[n], b[n], atol=1e-5) for n in a)
