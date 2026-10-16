@@ -141,3 +141,25 @@ def test_support_floor_gradient_survives_peaked_q():
     support_floor(logits.log_softmax(-1), levels).sum().backward()
     assert logits.grad[0, 0] < -0.05  # pulls up an almost-empty level
     assert logits.grad[0, 5] > 0.05   # pushes down the peak
+
+
+def test_adam_fraction_signal_vs_noise():
+    import torch
+    from train_frozen import adam_fraction
+    for noise, lo, hi in ((0.0, 0.99, 1.01), (100.0, 0.0, 0.3)):
+        torch.manual_seed(0)
+        p = torch.nn.Parameter(torch.zeros(10000))
+        opt = torch.optim.Adam([p], lr=1e-3)
+        for _ in range(50):
+            p.grad = torch.ones_like(p) + noise * torch.randn_like(p)
+            opt.step()
+        assert lo <= adam_fraction(opt) <= hi, (noise, adam_fraction(opt))
+
+
+def test_grad_report_parts():
+    import torch
+    from train_frozen import grad_report
+    a, b = torch.tensor([1.0, 0.0]), torch.tensor([0.0, 2.0])
+    r = grad_report({"objective": a, "kl": b}, {"objective": a})
+    assert r["norm_objective"] == 1.0 and r["norm_kl"] == 2.0 and abs(r["norm_total"] - 5 ** 0.5) < 1e-4
+    assert r["cos_kl_objective"] == 0.0 and r["cos_prev_objective"] == 1.0 and "cos_prev_kl" not in r

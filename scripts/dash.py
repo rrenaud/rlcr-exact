@@ -13,7 +13,7 @@ import streamlit as st
 ROOT = "/data/gpuq-runs/rrenaud"
 DEV_METRICS = ["greedy_brier", "greedy_auroc", "greedy_ece", "expected_brier", "greedy_mean", "expected_mean", "greedy_sd", "mass",
                "level_min_median", "answer_kl", "greedy_brier_f1", "greedy_auroc_f1", "expected_auroc"]
-TRAIN_METRICS = ["expected_reward", "answer_kl", "support_floor", "mass", "lr"]
+TRAIN_METRICS = ["expected_reward", "answer_kl", "support_floor", "adam_fraction", "mass", "lr"]
 # support_floor: cross-entropy (nats) from a uniform target over the 11 levels 0.0..1.0 to each row's level
 # marginal; ln 11 = 2.40 when a row spreads evenly, 6-10 when peaked as RLVR starts. Weighted by beta in the loss.
 
@@ -24,7 +24,8 @@ st.set_page_config(page_title="RLCR exact runs", layout="wide")
 def load(path, mtime):  # mtime keys the cache, so a growing log is re-read
     rows = [json.loads(l) for l in open(path) if l.strip()]
     args = next((r["args"] for r in rows if r["event"] == "data"), {})
-    return args, [r for r in rows if r["event"] == "eval"], [r for r in rows if r["event"] == "train"]
+    return (args, [r for r in rows if r["event"] == "eval"], [r for r in rows if r["event"] == "train"],
+            [r for r in rows if r["event"] == "grad"])
 
 
 def label(args, path):
@@ -42,8 +43,8 @@ def label(args, path):
 def runs():
     out = []
     for path in sorted(glob.glob(f"{ROOT}/rlcr-*/run-*/train_*.jsonl")):
-        args, evals, train = load(path, os.path.getmtime(path))
-        out.append(dict(path=path, experiment=path.split("/")[-3], args=args, evals=evals, train=train,
+        args, evals, train, grad = load(path, os.path.getmtime(path))
+        out.append(dict(path=path, experiment=path.split("/")[-3], args=args, evals=evals, train=train, grad=grad,
                         label=label(args, path)))
     return out
 
@@ -131,16 +132,37 @@ def body(chosen, show_small, text, split, smooth):
     if not train.empty:
         st.subheader("Training curves (rolling mean)")
         tm = st.multiselect("Train metrics", [m for m in TRAIN_METRICS if m in train.columns],
-                            default=[m for m in TRAIN_METRICS[:3] if m in train.columns], key="trm")
+                            default=[m for m in TRAIN_METRICS[:4] if m in train.columns], key="trm")
         cols = st.columns(2)
         for i, m in enumerate(tm):
             df = train[["run", "step", m]].dropna().sort_values("step")
             df[m] = df.groupby("run")[m].transform(lambda s: s.rolling(smooth, min_periods=1).mean())
             fig = px.line(df, x="step", y=m, color="run", height=330)
+            if m == "adam_fraction":
+                fig.add_hline(y=0.14, line_color="gray", annotation_text="noise floor (~0.14)")
             if m == "support_floor":
                 fig.add_hline(y=2.398, line_color="gray", annotation_text="ln 11 (uniform over levels)")
             fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), title=m)
             cols[i % 2].plotly_chart(fig, use_container_width=True, key=f"tr-{m}")
+
+    grad = pd.DataFrame([dict(run=r["label"], **g) for r in sel for g in r["grad"]])
+    if not grad.empty:
+        st.subheader("Gradient decomposition (separate backward per loss term)")
+        st.caption("norm_*: gradient norm of each weighted term of the step's mean loss (objective, floor = beta*CE, "
+                   "kl = W*KL). cos_prev_*: cosine with that term's previous measurement (consistency over time). "
+                   "cos_a_b: cosine between terms.")
+        norm_cols = [c for c in grad.columns if c.startswith("norm_")]
+        long = grad.melt(id_vars=["run", "step"], value_vars=norm_cols, var_name="term", value_name="norm").dropna()
+        fig = px.line(long, x="step", y="norm", color="run", line_dash="term", markers=True, height=380, log_y=True)
+        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), title="gradient norm by term")
+        cos_cols = [c for c in grad.columns if c.startswith("cos_")]
+        long_c = grad.melt(id_vars=["run", "step"], value_vars=cos_cols, var_name="pair", value_name="cos").dropna()
+        fig2 = px.line(long_c, x="step", y="cos", color="run", line_dash="pair", markers=True, height=380)
+        fig2.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), title="cosines",
+                           yaxis_range=[-1, 1])
+        c1, c2 = st.columns(2)
+        c1.plotly_chart(fig, use_container_width=True, key="grad-norm")
+        c2.plotly_chart(fig2, use_container_width=True, key="grad-cos")
 
 
 st.title("RLCR exact: frozen-confidence runs")

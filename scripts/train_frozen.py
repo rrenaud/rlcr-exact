@@ -182,6 +182,39 @@ def answer_kl(model, states, rows, ref_topk=None):
     return torch.stack(out)
 
 
+def flat_grad(params):
+    return torch.cat([(p.grad if p.grad is not None else torch.zeros_like(p)).detach().flatten().float() for p in params])
+
+
+def grad_report(parts, previous):
+    """Per-term gradient norms (of the step's mean loss), cosines between terms, and each term's cosine with its
+    previous measurement (a cheap consistency proxy over time)."""
+    cos = lambda u, v: (u @ v / (u.norm() * v.norm()).clamp_min(1e-30)).item()
+    out = {f"norm_{n}": g.norm().item() for n, g in parts.items()}
+    out["norm_total"] = sum(parts.values()).norm().item()
+    names = sorted(parts)
+    out |= {f"cos_{a}_{b}": cos(parts[a], parts[b]) for i, a in enumerate(names) for b in names[i + 1:]}
+    out |= {f"cos_prev_{n}": cos(g, previous[n]) for n, g in parts.items() if n in previous}
+    return {k: round(v, 5) for k, v in out.items()}
+
+
+@torch.no_grad()
+def adam_fraction(opt):
+    """Median over coordinates of |m_hat| / sqrt(v_hat): Adam's step along each coordinate's running-mean
+    direction, as a fraction of the learning rate (1 = consistent gradient, ~0.1-0.2 = noise)."""
+    beta1, beta2 = opt.param_groups[0]["betas"]
+    ratios = []
+    for p in opt.param_groups[0]["params"]:
+        st_ = opt.state.get(p)
+        if not st_:
+            continue
+        t = float(st_["step"])
+        m, v = st_["exp_avg"] / (1 - beta1 ** t), st_["exp_avg_sq"] / (1 - beta2 ** t)
+        nz = v > 0
+        ratios.append((m.abs()[nz] / v[nz].sqrt()).flatten().float())
+    return round(torch.cat(ratios).median().item(), 4) if ratios else None
+
+
 @torch.no_grad()
 def evaluate(model, rows, values, score, batch, drift_rows=()):
     """Dev metrics; with drift_rows, also their answer KL (per completion and per token)."""
@@ -242,6 +275,9 @@ def main():
     ap.add_argument("--support-floor", type=float, default=0.0,
                     help="beta: weight of the cross-entropy from a uniform target over the levels 0.0..1.0 to each "
                          "row's level marginal (0 = off); keeps probability on every level so training cannot collapse")
+    ap.add_argument("--grad-decomp-every", type=int, default=25,
+                    help="every N steps, backpropagate each loss term separately and log its gradient norm, the "
+                         "cosines between terms and with the term's previous measurement (0 = off; ~2 extra backwards)")
     ap.add_argument("--ref-topk", default=None, help="ref_topk.py cache of --train for the penalty (default: live pass)")
     ap.add_argument("--max-prefix", type=int, default=4608)
     ap.add_argument("--train-problems", type=int, default=None,
@@ -315,7 +351,8 @@ def main():
         return evaluate(model, dev, values, score, args.eval_batch, drift_rows)
     step = 0
     log(event="eval", step=0, split="dev", **evaluate_dev())
-    order, t0 = [], time.time()
+    order, t0, previous_parts = [], time.time(), {}
+    trainable = [p for p in model.parameters() if p.requires_grad]
     for step in range(1, args.steps + 1):
         if len(order) < args.problems_per_step:
             order += random.sample(group_ids, len(group_ids))
@@ -323,6 +360,8 @@ def main():
         del order[: args.problems_per_step]
         n_rows = sum(len(g) for g in batch)
         stats = collections.defaultdict(float)
+        decompose = args.grad_decomp_every and step % args.grad_decomp_every == 0
+        parts = {}
         for group in batch:
             # Sampled: draw every row's completion first (no grad) so the group baseline is known.
             if args.objective == "sampled":
@@ -352,20 +391,31 @@ def main():
                     for row, (j, reward) in zip(logps, draws[start: start + len(part)]):
                         logq = torch.log1p(-row.exp().sum().clamp(max=1 - 1e-6)) if j == len(row) else row[j]
                         loss = loss - (reward - baseline) * logq
+                terms = [("objective", loss)]
                 if args.support_floor:
                     floor = support_floor(logps, levels_gpu)
-                    loss = loss + args.support_floor * floor.sum()
+                    terms.append(("floor", args.support_floor * floor.sum()))
                     stats["support_floor"] += floor.sum().item() / n_rows
                 if args.answer_kl:
                     kl = answer_kl(model, states, part, ref_topk)
-                    loss = loss + args.answer_kl * kl.sum()
+                    terms.append(("kl", args.answer_kl * kl.sum()))
                     stats["answer_kl"] += kl.sum().item() / n_rows
-                (loss / n_rows).backward()
+                if decompose:  # one backward per term (graph kept), each term's gradient read off as a difference
+                    for k, (name, term) in enumerate(terms):
+                        before = flat_grad(trainable)
+                        (term / n_rows).backward(retain_graph=k < len(terms) - 1)
+                        parts[name] = parts.get(name, 0) + flat_grad(trainable) - before
+                else:
+                    (sum(t for _, t in terms) / n_rows).backward()
                 stats["expected_reward"] += expected.sum().item() / n_rows
                 stats["mass"] += logps.exp().sum().item() / n_rows
+        if decompose:
+            log(event="grad", step=step, **grad_report(parts, previous_parts))
+            previous_parts = parts
         opt.step(); sched.step(); opt.zero_grad(set_to_none=True)
         if step % 10 == 0:
-            log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, lr=opt.param_groups[0]["lr"], **{k: round(v, 4) for k, v in stats.items()})
+            log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, lr=opt.param_groups[0]["lr"],
+                adam_fraction=adam_fraction(opt), **{k: round(v, 4) for k, v in stats.items()})
         if step % args.eval_every == 0 or step == args.steps:
             log(event="eval", step=step, split="dev", **evaluate_dev())
     if test:
