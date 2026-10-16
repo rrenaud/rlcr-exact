@@ -11,9 +11,11 @@ import plotly.express as px
 import streamlit as st
 
 ROOT = "/data/gpuq-runs/rrenaud"
-DEV_METRICS = ["greedy_brier", "greedy_auroc", "greedy_ece", "expected_brier", "greedy_mean", "greedy_sd", "mass",
+DEV_METRICS = ["greedy_brier", "greedy_auroc", "greedy_ece", "expected_brier", "greedy_mean", "expected_mean", "greedy_sd", "mass",
                "level_min_median", "answer_kl", "greedy_brier_f1", "greedy_auroc_f1", "expected_auroc"]
 TRAIN_METRICS = ["expected_reward", "answer_kl", "support_floor", "mass", "lr"]
+# support_floor: cross-entropy (nats) from a uniform target over the 11 levels 0.0..1.0 to each row's level
+# marginal; ln 11 = 2.40 when a row spreads evenly, 6-10 when peaked as RLVR starts. Weighted by beta in the loss.
 
 st.set_page_config(page_title="RLCR exact runs", layout="wide")
 
@@ -91,6 +93,20 @@ def body(chosen, show_small, text, split, smooth):
     st.subheader(f"Eval curves ({split})")
     metrics = st.multiselect("Eval metrics", [m for m in DEV_METRICS if m in evals.columns],
                              default=[m for m in DEV_METRICS[:6] if m in evals.columns], key="evm")
+    st.markdown("**Mean confidence, overall and by correctness** (solid: all rows; dashed: correct; dotted: wrong; "
+                "per-correctness lines exist only for runs started after they were added to the log)")
+    conf = st.radio("Readout", ["greedy", "expected"], horizontal=True, key="conf")
+    parts = [(f"{conf}_mean", "all"), (f"{conf}_mean_correct", "correct"), (f"{conf}_mean_wrong", "wrong")]
+    long = pd.concat([evals[["run", "step", c]].rename(columns={c: "confidence"}).assign(rows=name)
+                      for c, name in parts if c in evals.columns], ignore_index=True).dropna()
+    if not long.empty:
+        acc = evals.groupby("run")["accuracy"].first() if "accuracy" in evals.columns else None
+        fig = px.line(long, x="step", y="confidence", color="run", line_dash="rows", markers=True, height=420,
+                      line_dash_map={"all": "solid", "correct": "dash", "wrong": "dot"})
+        if acc is not None and acc.nunique() == 1:  # one shared accuracy: draw it as the calibration target
+            fig.add_hline(y=float(acc.iloc[0]), line_color="gray", annotation_text=f"accuracy {acc.iloc[0]:.3f}")
+        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), yaxis_range=[0, 1])
+        st.plotly_chart(fig, use_container_width=True, key="conf-by-y")
     cols = st.columns(2)
     for i, m in enumerate(metrics):
         fig = px.line(evals, x="step", y=m, color="run", markers=True, height=330)
@@ -107,6 +123,8 @@ def body(chosen, show_small, text, split, smooth):
             df = train[["run", "step", m]].dropna().sort_values("step")
             df[m] = df.groupby("run")[m].transform(lambda s: s.rolling(smooth, min_periods=1).mean())
             fig = px.line(df, x="step", y=m, color="run", height=330)
+            if m == "support_floor":
+                fig.add_hline(y=2.398, line_color="gray", annotation_text="ln 11 (uniform over levels)")
             fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), title=m)
             cols[i % 2].plotly_chart(fig, use_container_width=True, key=f"tr-{m}")
 

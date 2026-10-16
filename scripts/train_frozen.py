@@ -205,7 +205,9 @@ def evaluate(model, rows, values, score, batch, drift_rows=()):
     out = {"rows": len(y), "accuracy": y.mean(), "accuracy_f1": y_f1.mean(), "mass": float(np.mean(mass)),
            "level_min_median": float(np.median(level_min)), "greedy_off_list": float(1 - ok.mean())}
     for name, c, yy, yf in (("greedy", g[ok], y[ok], y_f1[ok]), ("expected", e, y, y_f1)):
-        out |= {f"{name}_mean": c.mean(), f"{name}_sd": c.std()}
+        out |= {f"{name}_mean": c.mean(), f"{name}_sd": c.std(),
+                f"{name}_mean_correct": c[yy == 1].mean() if (yy == 1).any() else np.nan,
+                f"{name}_mean_wrong": c[yy == 0].mean() if (yy == 0).any() else np.nan}
         for suffix, labels in (("", yy), ("_f1", yf)):  # RLCR's labels, then F1 >= 0.5
             out |= {f"{name}_brier{suffix}": np.mean((c - labels) ** 2),
                     f"{name}_ece{suffix}": ece(c, labels, centred=name == "expected"),
