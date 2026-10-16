@@ -249,6 +249,29 @@ Informed by `rewarding_doubt`'s sweeps (`docs/sweeps/README.md` there; reports 0
   mean ± sd over 3 seeds, against the untrained checkpoint. A difference counts only if it exceeds the seed
   spread. In-domain the target is discrimination (Brier, AUROC), since ECE is already ~0.04.
 
+## Finding: the math model's confidence is deterministic given its analysis (2026-10-15)
+
+The no-penalty reference run (exact, 3e-4, `run-20261015T232731Z-fd144d67c7`) barely moved calibration: dev
+greedy Brier 0.188 -> 0.190 -> 0.190 at steps 0/100/200, every greedy level unchanged, expected-confidence AUROC
+0.712 -> 0.723. Meanwhile it drifted the answers by ~30 nats per completion. The reason is in the cached top-64
+at the position that writes the decimal digit (raw logprobs, temperature 1):
+
+| released checkpoint | rollouts | mean max digit prob | rows > 0.999 | rows < 0.9 | mean entropy |
+|---|---|---|---|---|---|
+| math (`big-math-digits-v2-brier-base-tabc`), fresh train, T=0.7 | 15,874 | 0.998 | 98.4% | 0.8% | 0.006 nats |
+| HotpotQA (`hotpot-v2-brier-7b-no-split`), conf-vote iteration-0 rollouts | 640 | 0.70 | 0% | 96–98% | 0.69 nats |
+
+- **Math:** the confidence is decided in `<analysis>` and only read out at the number. With q near one-hot,
+  the exact gradient sum_j q_j (R_j - J) grad log q_j vanishes, and so does the sampled one. The expectation
+  equals any sample, so there is also no variance to remove. Adam rescales tiny gradients to lr-sized steps,
+  which fits drift without calibration gain. Expected outcome of the math frozen-prefix sweep: null for
+  both objectives. **Stopped before it started.**
+- **HotpotQA:** the confidence stays uncertain given the analysis (entropy ~0.7 nats). This is the regime
+  where exact scoring helped in Rewarding Doubt.
+- HotpotQA's surface form differs: a leading space token (`Ġ 0 . 7 Ġ</`), and ~13% two-decimal values
+  (0.25, 0.75). The digit scorer would need the space variant and a second-digit read (or use the trie).
+- Caveat: the HotpotQA numbers come from 640 rollouts (20 questions x 32) of the other work stream.
+
 ## Next steps
 
 1. ~~Analyze the cache~~ (done: see "Fresh train rollouts" above).
