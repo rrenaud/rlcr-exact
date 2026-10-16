@@ -94,8 +94,16 @@ def body(chosen, show_small, text, split, smooth):
     metrics = st.multiselect("Eval metrics", [m for m in DEV_METRICS if m in evals.columns],
                              default=[m for m in DEV_METRICS[:6] if m in evals.columns], key="evm")
     st.markdown("**Mean confidence, overall and by correctness** (solid: all rows; dashed: correct; dotted: wrong; "
-                "per-correctness lines exist only for runs started after they were added to the log)")
+                "derived from mean, sd, Brier and accuracy when a log does not record them)")
     conf = st.radio("Readout", ["greedy", "expected"], horizontal=True, key="conf")
+    # Older logs have no per-correctness means; recover them from the aggregates (exact: y is 0/1, so
+    # Brier = E[c^2] - 2 a m1 + a with E[c^2] = sd^2 + mean^2; greedy stats skip off-list rows, off by greedy_off_list).
+    if all(c in evals.columns for c in (f"{conf}_mean", f"{conf}_sd", f"{conf}_brier", "accuracy")):
+        a, mu, sd, b = (evals[c] for c in ("accuracy", f"{conf}_mean", f"{conf}_sd", f"{conf}_brier"))
+        m1 = (sd ** 2 + mu ** 2 + a - b) / (2 * a)
+        m0 = (mu - a * m1) / (1 - a)
+        for col, derived in ((f"{conf}_mean_correct", m1), (f"{conf}_mean_wrong", m0)):
+            evals[col] = evals[col].fillna(derived) if col in evals.columns else derived
     parts = [(f"{conf}_mean", "all"), (f"{conf}_mean_correct", "correct"), (f"{conf}_mean_wrong", "wrong")]
     long = pd.concat([evals[["run", "step", c]].rename(columns={c: "confidence"}).assign(rows=name)
                       for c, name in parts if c in evals.columns], ignore_index=True).dropna()
