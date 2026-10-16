@@ -29,16 +29,16 @@ def main():
             start, end = dev[0], dev[-1]
             eligible = (end["mass"] >= 0.99 and end["greedy_off_list"] <= 0.01 and end["greedy_sd"] >= 0.05
                         and end["greedy_auroc"] >= start["greedy_auroc"] - 0.02)
-            runs.append(dict(objective=args["objective"], lr=args["lr"], seed=args["seed"], steps=end["step"],
+            runs.append(dict(objective=args["objective"], lr=args["lr"], seed=args["seed"], floor=args.get("support_floor", 0.0), steps=end["step"],
                              finished=end["step"] == args["steps"], eligible=eligible, start=start, end=end, test=test,
                              drift=end.get("answer_kl", float("nan")) - start.get("answer_kl", float("nan")),
                              run=os.path.basename(os.path.dirname(path))))
-    runs.sort(key=lambda r: (r["objective"], r["lr"], r["seed"]))
+    runs.sort(key=lambda r: (r["objective"], r["floor"], r["lr"], r["seed"]))
     cols = ("greedy_brier", "greedy_auroc", "greedy_ece", "expected_brier", "greedy_brier_f1", "greedy_auroc_f1")
-    print(f"{'objective':8s} {'lr':>7s} {'seed':>4s} {'step':>5s} {'elig':>4s} " + " ".join(f"{c:>15s}" for c in cols) + f" {'drift':>7s}")
+    print(f"{'objective':8s} {'floor':>5s} {'lr':>7s} {'seed':>4s} {'step':>5s} {'elig':>4s} " + " ".join(f"{c:>15s}" for c in cols) + f" {'drift':>7s}")
     for r in runs:
         cells = " ".join(f"{r['start'].get(c, float('nan')):.4f}->{r['end'].get(c, float('nan')):.4f}" for c in cols)
-        print(f"{r['objective']:8s} {r['lr']:7.0e} {r['seed']:4d} {r['steps']:5d} {'yes' if r['eligible'] else 'NO':>4s} {cells} {r['drift']:7.3f}")
+        print(f"{r['objective']:8s} {r['floor']:5g} {r['lr']:7.0e} {r['seed']:4d} {r['steps']:5d} {'yes' if r['eligible'] else 'NO':>4s} {cells} {r['drift']:7.3f}")
     for objective in sorted({r["objective"] for r in runs}):
         cands = [r for r in runs if r["objective"] == objective and r["eligible"] and r["finished"] and r["seed"] == 0]
         if not cands:
