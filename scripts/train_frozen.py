@@ -275,9 +275,11 @@ def main():
     ap.add_argument("--support-floor", type=float, default=0.0,
                     help="beta: weight of the cross-entropy from a uniform target over the levels 0.0..1.0 to each "
                          "row's level marginal (0 = off); keeps probability on every level so training cannot collapse")
-    ap.add_argument("--grad-decomp-every", type=int, default=25,
-                    help="every N steps, backpropagate each loss term separately and log its gradient norm, the "
-                         "cosines between terms and with the term's previous measurement (0 = off; ~2 extra backwards)")
+    ap.add_argument("--grad-decomp-every", type=int, default=0,
+                    help="diagnostic, off by default: every N steps, backpropagate each loss term separately and log its "
+                         "gradient norm, the cosines between terms and with the term's previous measurement (about 2 "
+                         "extra backwards per measured step; 25 costs ~5%%). Use while tuning loss weights; leave it "
+                         "off once training is stable (adam_fraction is always logged and costs nothing)")
     ap.add_argument("--ref-topk", default=None, help="ref_topk.py cache of --train for the penalty (default: live pass)")
     ap.add_argument("--max-prefix", type=int, default=4608)
     ap.add_argument("--train-problems", type=int, default=None,

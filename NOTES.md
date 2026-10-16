@@ -412,6 +412,19 @@ RLCR-hotpot was trained from Qwen2.5-7B base (`configs/Qwen-7B/hotpot/RLCR.yaml`
   cached text. A low AUROC ceiling here points at Stage B.
 - Queue: the same six-config sweep from RLVR (`TASK=hotpot-rlvr`), then seeds 1-2 at 1e-4 from the RLCR checkpoint.
 
+## Gradient diagnostics (2026-10-16)
+
+- `grad_check.py` (offline, 24 batches): from the RLVR start the calibration-only gradient is consistent
+  (consistency 0.53-0.67 at step 0 and after 500 steps) but 9-21x smaller than the W=1 answer-KL gradient, which
+  is noise across batches (consistency 0.04-0.13; at step 0 it is the bf16 packed-vs-unpacked reference mismatch).
+  Adam's step fraction for calibration + KL is 0.17-0.23, about the noise floor (0.14), so W=1 runs random-walk.
+  The strong step-0 objective gradient is the off-list (" 1 ") fix, finished by step 100. The overfit runs moved
+  because a fixed batch makes even the KL gradient consistent.
+- `train_frozen.py --grad-decomp-every N` logs per-term gradient norms and cosines (`event: grad`) at ~5% cost
+  for N = 25. **It defaults to off: use it while tuning loss weights, and drop it once training is stable.**
+  `adam_fraction` (median |m_hat|/sqrt(v_hat) from Adam's state) is logged every 10 steps at no cost.
+- Queued: exact 3e-4, beta 0.03, W in {0.1, 0.03, 0.01}, with --grad-decomp-every 25.
+
 ## Next steps
 
 1. ~~Analyze the cache~~ (done: see "Fresh train rollouts" above).
