@@ -153,16 +153,16 @@ def body(chosen, show_small, text, split, smooth):
                    "cos_a_b: cosine between terms.")
         norm_cols = [c for c in grad.columns if c.startswith("norm_")]
         long = grad.melt(id_vars=["run", "step"], value_vars=norm_cols, var_name="term", value_name="norm").dropna()
-        fig = px.line(long, x="step", y="norm", color="run", line_dash="term", markers=True, height=380, log_y=True)
-        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), title="gradient norm by term")
+        # Full page width each, legend underneath: runs x terms make long legends that squeeze a side legend's plot.
+        below = dict(orientation="h", yanchor="top", y=-0.15, x=0, font=dict(size=10))
+        fig = px.line(long, x="step", y="norm", color="run", line_dash="term", markers=True, height=520, log_y=True)
+        fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=below, title="gradient norm by term")
         cos_cols = [c for c in grad.columns if c.startswith("cos_")]
         long_c = grad.melt(id_vars=["run", "step"], value_vars=cos_cols, var_name="pair", value_name="cos").dropna()
-        fig2 = px.line(long_c, x="step", y="cos", color="run", line_dash="pair", markers=True, height=380)
-        fig2.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=dict(font=dict(size=9)), title="cosines",
-                           yaxis_range=[-1, 1])
-        c1, c2 = st.columns(2)
-        c1.plotly_chart(fig, use_container_width=True, key="grad-norm")
-        c2.plotly_chart(fig2, use_container_width=True, key="grad-cos")
+        fig2 = px.line(long_c, x="step", y="cos", color="run", line_dash="pair", markers=True, height=520)
+        fig2.update_layout(margin=dict(l=10, r=10, t=30, b=10), legend=below, title="cosines", yaxis_range=[-1, 1])
+        st.plotly_chart(fig, use_container_width=True, key="grad-norm")
+        st.plotly_chart(fig2, use_container_width=True, key="grad-cos")
 
 
 st.title("RLCR exact: frozen-confidence runs")
