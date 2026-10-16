@@ -272,6 +272,41 @@ at the position that writes the decimal digit (raw logprobs, temperature 1):
   (0.25, 0.75). The digit scorer would need the space variant and a second-digit read (or use the trie).
 - Caveat: the HotpotQA numbers come from 640 rollouts (20 questions x 32) of the other work stream.
 
+## Decision: Stage A moves to HotpotQA (2026-10-16)
+
+- **Math copies a pre-written confidence.** In 98.6% of fresh-train math rollouts the `<analysis>` already
+  states the number, and the tag copies it (p(sampled tag digit) 0.9997). Where the analysis first writes the
+  digit, the model is uncertain: p(sampled digit) mean 0.87, 32% of rows < 0.9, 11% < 0.6. Brier also
+  punishes randomness in the readout (E[(y - c)^2] = (y - E c)^2 + Var c), so RLCR's optimum is a
+  deterministic tag, and training moved the uncertainty upstream into free text.
+- The math model is not a constant predictor across problems: 14 distinct values, accuracy on the diagonal,
+  pooled AUROC 0.72. Within a problem it nearly is: mean within-problem AUROC 0.585 over 681 mixed-correctness
+  problems, and in 11% of those all 8 samples state the same value.
+- **HotpotQA does not copy.** Its analysis states the number in 0% of 512 untrained rollouts (16 questions,
+  conf-vote's iteration 0); p(sampled tag digit) averages 0.62.
+- Confidence spread, as unselected mass (1 - sum q^2):
+
+  | model | unselected mass |
+  |---|---|
+  | RLCR-hotpot, released | 0.41 (entropy 0.69 nats) |
+  | rewarding_doubt base models | 0.33-0.37 |
+  | rewarding_doubt exact, trained | 0.30 (300 steps), 0.22-0.27 (2,729 steps) |
+  | rewarding_doubt sampled + value head | 0.13-0.18 |
+  | rewarding_doubt sampled | 0.02-0.06 (0.000 with RLOO whitening) |
+  | RLCR-math, released | 0.003 (entropy 0.006 nats) |
+
+  Sampled policy gradients collapse the readout; exact keeps it spread. RLCR-math (GRPO, lr 5e-6) looks like
+  rewarding_doubt's collapsed sampled runs; RLCR-hotpot (lr 1e-6) is more spread than rewarding_doubt's bases.
+- **Data:** `scripts/build_hotpot_fresh.py` rebuilds mehuldamani/hotpot_qa's prompts byte for byte
+  (20,000/20,000). Fresh: 4,000 train + 1,000 dev distractor-train questions (gold_removed 0/1/2 in thirds),
+  plus their 500-question test (the paper's in-domain HotpotQA-Modified eval).
+- **Scorer:** `--scorer hotpot`, 21 values (0.0–0.9, 0.05–0.95, 1.0) x {`Ġ 0 . d Ġ</`, `0 . d </`}
+  through a 93-node trie up to the closing token, which separates 0.7 from 0.75. It covers 1,024/1,024 sampled
+  untrained tails. The trie scorer now also returns hidden states for the answer-KL penalty.
+- Cache: gpuq `rlcr-hotpot-cache` / `run-20261016T003439Z-bc13159a85` (`scripts/cache_hotpot.sh`).
+- The math W=1 sweep and its reference cache were cancelled before they started. The no-penalty math run
+  finishes as the record of the null result.
+
 ## Next steps
 
 1. ~~Analyze the cache~~ (done: see "Fresh train rollouts" above).

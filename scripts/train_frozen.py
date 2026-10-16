@@ -7,6 +7,8 @@ confidence completion is trained, over one of two candidate sets scored exactly:
   --scorer digit (default): the one-decimal levels 0.0 .. 1.0 plus a bare "0", from "0" "." appended to the
                   prefix (digit_score.py); the tail after the digit is not scored
   --scorer trie:  114 strings x 2 end tokens, through a token trie (trie_score.py); the reference
+  --scorer hotpot: RLCR-hotpot's 21 values x {spaced, unspaced}, through a trie up to the closing `</`
+                  (confidence.hotpot_candidates)
 
   exact:   maximize sum_j q_j R_j (the unlisted mass earns 0, as a malformed completion does in RLCR)
   sampled: GRPO on the confidence tokens alone: sample one completion per row from q (or "other"),
@@ -40,7 +42,7 @@ from sklearn.metrics import roc_auc_score
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from rlcr_exact.confidence import exact_objective, make_candidates, rlcr_reward
+from rlcr_exact.confidence import exact_objective, hotpot_candidates, make_candidates, rlcr_reward
 from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
 from rlcr_exact.trie_score import candidate_logps
 
@@ -79,16 +81,20 @@ def load_rows(path, token_bytes, max_prefix):
 def make_scorer(name, tok):
     """(values [K], score, description) where score(model, prefixes, greedy) gives [len(prefixes), K] logps,
     plus with greedy=True the index of the greedy candidate per row (None when greedy leaves the set). The digit
-    scorer also takes hidden=True and then returns the forward's hidden states last (for answer_kl)."""
+    and trie scorers also take hidden=True and then return the forward's hidden states last (for answer_kl): a
+    [rows, width, d] tensor for digit, a list of per-row [width, d] tensors for the tries."""
     if name == "digit":
         ids = DigitIds.from_tokenizer(tok)
         score = lambda model, prefixes, greedy=False, hidden=False: level_logps(model, prefixes, ids, greedy, hidden)
         return LEVELS, score, dict(levels=len(LEVELS))
-    cands = make_candidates(tok)
+    cands = hotpot_candidates(tok) if name == "hotpot" else make_candidates(tok)
 
-    def score(model, prefixes, greedy=False):
-        outs = [candidate_logps(model, p, cands.trie, greedy=greedy) for p in prefixes]
-        return (torch.stack([o[0] for o in outs]), [o[1] for o in outs]) if greedy else torch.stack(outs)
+    def score(model, prefixes, greedy=False, hidden=False):
+        outs = [candidate_logps(model, p, cands.trie, greedy=greedy, hidden=hidden) for p in prefixes]
+        if not (greedy or hidden):
+            return torch.stack(outs)
+        cols = list(zip(*outs))
+        return (torch.stack(cols[0]), *([list(cols[1])] if greedy else []), *([list(cols[-1])] if hidden else []))
     return cands.values, score, dict(candidates=len(cands.strings), trie_nodes=len(cands.trie.tokens))
 
 
@@ -154,22 +160,22 @@ class RefTopk:
 
 def answer_kl(model, states, rows, ref_topk=None):
     """[len(rows)] KL(current || untrained) over the vocabulary, summed over each row's cached completion tokens
-    before the confidence. states: the current model's last hidden states [rows, width, d] (right-padded, as
-    level_logps returns them). The untrained side is a no-grad pass with the adapter off, or with ref_topk the
+    before the confidence. states: the current model's last hidden states per row ([rows, width, d] right-padded,
+    as level_logps returns them, or a list of per-row [width, d] from the trie scorers). The untrained side is a no-grad pass with the adapter off, or with ref_topk the
     cached top-k log-probs (coarse-grained KL, never more than the exact one)."""
     base = model.get_base_model()
     out = []
     for b, row in enumerate(rows):
-        cur = states[b, row.start - 1: len(row.prefix) - 1]  # position t predicts token t + 1
+        cur = states[b][row.start - 1: len(row.prefix) - 1]  # position t predicts token t + 1
         if ref_topk is None:
             with torch.no_grad(), model.disable_adapter():
-                ids = torch.tensor([row.prefix], device=states.device)
+                ids = torch.tensor([row.prefix], device=cur.device)
                 ref = base.model(input_ids=ids, use_cache=False).last_hidden_state[0, row.start - 1: len(row.prefix) - 1]
             chunk = lambda c: (_chunk_kl, cur[c: c + KL_CHUNK], ref[c: c + KL_CHUNK])
         else:
-            ref_ids, ref_logp = ref_topk.get(row, states.device)
+            ref_ids, ref_logp = ref_topk.get(row, cur.device)
             chunk = lambda c: (_chunk_kl_topk, cur[c: c + KL_CHUNK], ref_ids[c: c + KL_CHUNK], ref_logp[c: c + KL_CHUNK])
-        total = states.new_zeros((), dtype=torch.float32)
+        total = cur.new_zeros((), dtype=torch.float32)
         for c in range(0, len(cur), KL_CHUNK):
             fn, *tensors = chunk(c)
             total = total + checkpoint(fn, base.lm_head, *tensors, use_reentrant=False)
@@ -206,10 +212,10 @@ def evaluate(model, rows, values, score, batch, drift_rows=()):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="mehuldamani/big-math-digits-v2-brier-base-tabc")
+    ap.add_argument("--model", default=None, help="default: the released checkpoint for the scorer's task")
     ap.add_argument("--train", required=True); ap.add_argument("--dev", required=True); ap.add_argument("--test")
     ap.add_argument("--objective", choices=["exact", "sampled"], required=True)
-    ap.add_argument("--scorer", choices=["digit", "trie"], default="digit")
+    ap.add_argument("--scorer", choices=["digit", "trie", "hotpot"], default="digit")
     ap.add_argument("--micro-batch", type=int, default=1, help="rows per forward/backward when training")
     ap.add_argument("--eval-batch", type=int, default=1, help="rows per no-grad forward (evaluation, sampling)")
     ap.add_argument("--lr", type=float, default=3e-4)
@@ -226,9 +232,10 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     args = ap.parse_args()
+    args.model = args.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if args.scorer == "hotpot"
+                                else "mehuldamani/big-math-digits-v2-brier-base-tabc")
     random.seed(args.seed); torch.manual_seed(args.seed)
     run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_W{args.answer_kl:g}_s{args.seed}"
-    assert args.answer_kl == 0 or args.scorer == "digit", "the answer-KL penalty needs the digit scorer's hidden states"
     log_path = os.path.join(args.out, f"train_{run_name}.jsonl")
 
     def log(**rec):
@@ -268,7 +275,7 @@ def main():
             f"--ref-topk was built for {m['rollouts']} (max_prefix {m['max_prefix']}, {m['model']})"
         assert all((r.qid, r.j) in ref_topk.index for r in train), "--ref-topk is missing training rows"
 
-    drift_rows = dev[: args.drift_rows] if args.scorer == "digit" else []
+    drift_rows = dev[: args.drift_rows]
     evaluate_dev = lambda: evaluate(model, dev, values, score, args.eval_batch, drift_rows)
     log(event="eval", step=0, split="dev", **evaluate_dev())
     order, t0 = [], time.time()

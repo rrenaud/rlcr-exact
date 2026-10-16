@@ -39,6 +39,26 @@ def make_candidates(tokenizer) -> Candidates:
     return Candidates(strings, torch.tensor(values), build_trie(seqs))
 
 
+def hotpot_candidates(tokenizer) -> Candidates:
+    """RLCR-hotpot's confidence strings, scored through the token that closes the number.
+
+    The released hotpot model writes `Ġ` `0` `.` `7` `Ġ</` ... (94% of untrained rollouts) or the same without
+    the spaces, `0` `.` `7` `</` ... (6%), and 16% of its values have a second decimal 5 (0.75, 0.25, ...). The
+    candidates are 0.0 .. 0.9, 0.05 .. 0.95 and 1.0 in both forms (42). Scoring the closing `</` or `Ġ</`
+    separates "0.7" from "0.75"; what follows it (`confidence` `>` end of turn) is not scored.
+    """
+    tid = tokenizer.convert_tokens_to_ids
+    values = [d / 10 for d in range(10)] + [d / 10 + 0.05 for d in range(10)] + [1.0]
+    texts = [f"0.{d}" for d in range(10)] + [f"0.{d}5" for d in range(10)] + ["1.0"]
+    strings, vals, seqs = [], [], []
+    for lead, close in ((["Ġ"], "Ġ</"), ([], "</")):
+        for text, v in zip(texts, values):
+            strings.append("".join(lead).replace("Ġ", " ") + text + close.replace("Ġ", " "))
+            vals.append(v)
+            seqs.append([tid(t) for t in lead] + [tid(c) for c in text] + [tid(close)])
+    return Candidates(strings, torch.tensor(vals), build_trie(seqs))
+
+
 def rlcr_reward(values: torch.Tensor, correct: torch.Tensor) -> torch.Tensor:
     """RLCR's total reward for each well-formed candidate (malformed completions earn 0)."""
     y = correct.to(values.dtype)

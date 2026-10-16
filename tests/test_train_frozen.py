@@ -115,3 +115,17 @@ def test_backward_stops_at_first_adapter_with_same_grads():
     after, needs_after = run(True)
     assert needs_before and not needs_after  # layer 0 has no adapter: no backward through it after the fix
     assert before.keys() == after.keys() and all(torch.allclose(before[n], after[n], atol=1e-6) for n in before)
+
+
+def test_trie_scorer_hidden_states_feed_answer_kl():
+    from rlcr_exact.trie_score import build_trie, candidate_logps
+    trie = build_trie([[5, 7, 30], [5, 7, 31, 8], [6, 8]])
+    model = lora(False).eval()
+    with torch.no_grad():
+        states = [candidate_logps(model, r.prefix, trie, hidden=True)[1] for r in ROWS]
+        for r, h in zip(ROWS, states):  # the prefix's rows equal a plain forward over the prefix
+            plain = model.get_base_model().model(input_ids=torch.tensor([r.prefix])).last_hidden_state[0]
+            assert torch.allclose(h[: len(r.prefix)], plain, atol=1e-5)
+        trie_kl = answer_kl(model, states, ROWS)
+        digit_kl = answer_kl(model, score(model, [r.prefix for r in ROWS], hidden=True)[1], ROWS)
+    assert torch.allclose(trie_kl, digit_kl, atol=1e-5)

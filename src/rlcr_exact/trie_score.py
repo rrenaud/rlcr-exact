@@ -49,11 +49,12 @@ def trie_mask(trie: Trie, prefix_len: int, dtype, device) -> torch.Tensor:
     return mask[None, None]
 
 
-def candidate_logps(model, prefix_ids: list[int], trie: Trie, greedy: bool = False):
+def candidate_logps(model, prefix_ids: list[int], trie: Trie, greedy: bool = False, hidden: bool = False):
     """[num_candidates] summed log-probabilities of each candidate after `prefix_ids` (differentiable).
 
     With greedy=True also returns the candidate that token-level greedy decoding reaches from the prefix,
-    or None when the greedy token at some step is not in the trie.
+    or None when the greedy token at some step is not in the trie. With hidden=True also returns (last) the
+    forward's hidden states [L + nodes, d]; the first L rows are the prefix's own (trie nodes come after).
     """
     model = model.get_base_model() if hasattr(model, "get_base_model") else model  # unwrap PEFT
     device = next(model.parameters()).device
@@ -62,15 +63,16 @@ def candidate_logps(model, prefix_ids: list[int], trie: Trie, greedy: bool = Fal
     positions = torch.tensor([list(range(L)) + [L + d for d in trie.depths]], device=device)
     dtype = next(p for p in model.parameters() if p.is_floating_point()).dtype
     mask = trie_mask(trie, L, dtype, device)
-    hidden = model.model(input_ids=ids, attention_mask=mask, position_ids=positions, use_cache=False).last_hidden_state[0]
+    states = model.model(input_ids=ids, attention_mask=mask, position_ids=positions, use_cache=False).last_hidden_state[0]
     # Logits are needed only where a trie token is predicted: the last prefix position and each parent node.
     read_rows = sorted({L - 1 if p < 0 else L + p for p in trie.parents})
     row_of = {r: k for k, r in enumerate(read_rows)}
-    logp = model.lm_head(hidden[read_rows]).float().log_softmax(-1)
+    logp = model.lm_head(states[read_rows]).float().log_softmax(-1)
     node_logp = torch.stack([logp[row_of[L - 1 if p < 0 else L + p], t] for t, p in zip(trie.tokens, trie.parents)])
     cand = torch.stack([node_logp[path].sum() for path in trie.leaf_paths])
+    extra = (states,) if hidden else ()
     if not greedy:
-        return cand
+        return (cand, *extra) if extra else cand
     argmax = logp.argmax(-1).tolist()
     child = {(p, t): i for i, (t, p) in enumerate(zip(trie.tokens, trie.parents))}
     leaf_of = {path[-1]: k for k, path in enumerate(trie.leaf_paths)}
@@ -78,7 +80,7 @@ def candidate_logps(model, prefix_ids: list[int], trie: Trie, greedy: bool = Fal
     while True:
         row = L - 1 if node < 0 else L + node
         if row not in row_of:  # a leaf: the candidate is complete
-            return cand, leaf_of.get(node)
+            return (cand, leaf_of.get(node), *extra)
         node = child.get((node, argmax[row_of[row]]))
         if node is None:
-            return cand, None
+            return (cand, None, *extra)
