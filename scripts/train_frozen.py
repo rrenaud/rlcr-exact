@@ -226,6 +226,9 @@ def main():
                          "scorers, whose rows share the prompt and are packed into one forward; 1 for digit)")
     ap.add_argument("--eval-batch", type=int, default=1, help="rows per no-grad forward (evaluation, sampling)")
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--warmup-steps", type=int, default=0, help="linear warmup from 0 to --lr over this many steps")
+    ap.add_argument("--decay-frac", type=float, default=0.0,
+                    help="WSD: linear decay to 0 over this final fraction of --steps (0 = constant after warmup)")
     ap.add_argument("--lora-r", type=int, default=4)
     ap.add_argument("--lora-first-layer", type=int, default=14, help="adapt only layers >= this one (Qwen2.5-7B has 28)")
     ap.add_argument("--problems-per-step", type=int, default=4, help="problems per update (x their rollouts each)")
@@ -252,6 +255,8 @@ def main():
     run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_W{args.answer_kl:g}_s{args.seed}"
     if args.support_floor:
         run_name += f"_F{args.support_floor:g}"
+    if args.warmup_steps or args.decay_frac:
+        run_name += f"_wsd{args.warmup_steps}-{args.decay_frac:g}"
     if args.train_problems:
         run_name += f"_overfit{args.train_problems}"
     log_path = os.path.join(args.out, f"train_{run_name}.jsonl")
@@ -287,6 +292,10 @@ def main():
     stop_backward_at_first_adapter(model)
     model.train()
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
+    decay_start = args.steps * (1 - args.decay_frac)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda i: min(  # i = updates done so far
+        (i + 1) / args.warmup_steps if args.warmup_steps else 1.0,
+        (args.steps - i) / (args.steps - decay_start) if args.decay_frac and i >= decay_start else 1.0))
     evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch)
     values_gpu = values.cuda()
     levels_gpu = level_matrix(values_gpu)
@@ -352,9 +361,9 @@ def main():
                 (loss / n_rows).backward()
                 stats["expected_reward"] += expected.sum().item() / n_rows
                 stats["mass"] += logps.exp().sum().item() / n_rows
-        opt.step(); opt.zero_grad(set_to_none=True)
+        opt.step(); sched.step(); opt.zero_grad(set_to_none=True)
         if step % 10 == 0:
-            log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, **{k: round(v, 4) for k, v in stats.items()})
+            log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, lr=opt.param_groups[0]["lr"], **{k: round(v, 4) for k, v in stats.items()})
         if step % args.eval_every == 0 or step == args.steps:
             log(event="eval", step=step, split="dev", **evaluate_dev())
     if test:
