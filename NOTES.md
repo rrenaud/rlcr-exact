@@ -304,6 +304,13 @@ at the position that writes the decimal digit (raw logprobs, temperature 1):
   through a 93-node trie up to the closing token, which separates 0.7 from 0.75. It covers 1,024/1,024 sampled
   untrained tails. The trie scorer now also returns hidden states for the answer-KL penalty.
 - Cache: gpuq `rlcr-hotpot-cache` / `run-20261016T003439Z-bc13159a85` (`scripts/cache_hotpot.sh`).
+- **Released RLCR-hotpot, reproduced** (paper's 500-question test, temperature 0): accuracy 0.435, Brier 0.196,
+  ECE 0.084, AUROC 0.778, against the released eval's 0.444 / 0.188 / 0.078 / 0.798; format ok 99.8%, median
+  completion 246 tokens. Fresh dev (1,000): 0.517 / 0.184 / 0.036 / 0.795. The accuracy gap is the difficulty
+  mix. Their test comes from HotpotQA's validation split (all "hard"); fresh dev comes from the train split
+  like RLCR's training data (easy/medium/hard). Hard-only dev accuracy is 0.386 against test's 0.434. Accuracy
+  by gold paragraphs removed (0/1/2): dev 0.75 / 0.52 / 0.28, test 0.68 / 0.41 / 0.20. Select on dev; report
+  both.
 - The math W=1 sweep and its reference cache were cancelled before they started. The no-penalty math run was
   cancelled at step ~420 of 500. Its dev greedy Brier / AUROC were 0.188 / 0.713 at step 0 and 0.1895 /
   0.718 at step 400, and drift was ~30 nats per completion: the null result, kept in its log.
