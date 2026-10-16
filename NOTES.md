@@ -304,8 +304,9 @@ at the position that writes the decimal digit (raw logprobs, temperature 1):
   through a 93-node trie up to the closing token, which separates 0.7 from 0.75. It covers 1,024/1,024 sampled
   untrained tails. The trie scorer now also returns hidden states for the answer-KL penalty.
 - Cache: gpuq `rlcr-hotpot-cache` / `run-20261016T003439Z-bc13159a85` (`scripts/cache_hotpot.sh`).
-- The math W=1 sweep and its reference cache were cancelled before they started. The no-penalty math run
-  finishes as the record of the null result.
+- The math W=1 sweep and its reference cache were cancelled before they started. The no-penalty math run was
+  cancelled at step ~420 of 500. Its dev greedy Brier / AUROC were 0.188 / 0.713 at step 0 and 0.1895 /
+  0.718 at step 400, and drift was ~30 nats per completion: the null result, kept in its log.
 
 ## Next steps
 
