@@ -129,3 +129,15 @@ def test_trie_scorer_hidden_states_feed_answer_kl():
         trie_kl = answer_kl(model, states, ROWS)
         digit_kl = answer_kl(model, score(model, [r.prefix for r in ROWS], hidden=True)[1], ROWS)
     assert torch.allclose(trie_kl, digit_kl, atol=1e-5)
+
+
+def test_support_floor_gradient_survives_peaked_q():
+    import torch
+    from rlcr_exact.confidence import level_matrix, support_floor
+    values = torch.tensor([0.0, 0.1, 0.15, 0.5, 0.50, 1.0])
+    levels = level_matrix(values)
+    assert levels.shape == (11, 6) and levels[5].tolist() == [0, 0, 0, 1, 1, 0] and levels.sum() == 5
+    logits = torch.tensor([[-20.0, -20.0, -20.0, -20.0, -20.0, 0.0]], requires_grad=True)
+    support_floor(logits.log_softmax(-1), levels).sum().backward()
+    assert logits.grad[0, 0] < -0.05  # pulls up an almost-empty level
+    assert logits.grad[0, 5] > 0.05   # pushes down the peak

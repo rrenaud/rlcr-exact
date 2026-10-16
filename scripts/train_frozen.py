@@ -42,7 +42,7 @@ from sklearn.metrics import roc_auc_score
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from rlcr_exact.confidence import exact_objective, hotpot_candidates, make_candidates, rlcr_reward
+from rlcr_exact.confidence import exact_objective, hotpot_candidates, level_matrix, make_candidates, rlcr_reward, support_floor
 from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
 from rlcr_exact.grading import f1_correct
 from rlcr_exact.trie_score import packed_candidate_logps
@@ -186,12 +186,14 @@ def answer_kl(model, states, rows, ref_topk=None):
 def evaluate(model, rows, values, score, batch, drift_rows=()):
     """Dev metrics; with drift_rows, also their answer KL (per completion and per token)."""
     model.eval()
-    greedy, expected, mass, y, y_f1 = [], [], [], [], []
+    greedy, expected, mass, y, y_f1, level_min = [], [], [], [], [], []
+    levels = level_matrix(values)
     for part in chunks(rows, batch):
         logps, picks = score(model, [r[1] for r in part], greedy=True)
         for q, k, row in zip(logps.exp().cpu(), picks, part):
             greedy.append(np.nan if k is None else values[k].item())
             mass.append(q.sum().item())
+            level_min.append((levels @ q).min().item())
             expected.append((q * values).sum().item() / max(q.sum().item(), 1e-9))
             y.append(row.correct)
             y_f1.append(row.correct_f1)
@@ -201,7 +203,7 @@ def evaluate(model, rows, values, score, batch, drift_rows=()):
     g, e, y, y_f1 = np.array(greedy), np.array(expected), np.array(y), np.array(y_f1)
     ok = ~np.isnan(g)
     out = {"rows": len(y), "accuracy": y.mean(), "accuracy_f1": y_f1.mean(), "mass": float(np.mean(mass)),
-           "greedy_off_list": float(1 - ok.mean())}
+           "level_min_median": float(np.median(level_min)), "greedy_off_list": float(1 - ok.mean())}
     for name, c, yy, yf in (("greedy", g[ok], y[ok], y_f1[ok]), ("expected", e, y, y_f1)):
         out |= {f"{name}_mean": c.mean(), f"{name}_sd": c.std()}
         for suffix, labels in (("", yy), ("_f1", yf)):  # RLCR's labels, then F1 >= 0.5
@@ -232,6 +234,9 @@ def main():
     ap.add_argument("--dev-limit", type=int, default=None)
     ap.add_argument("--drift-rows", type=int, default=200, help="dev rows for the answer-KL metric (0 = off)")
     ap.add_argument("--answer-kl", type=float, default=1.0, help="W: weight of the answer-KL penalty (0 = off)")
+    ap.add_argument("--support-floor", type=float, default=0.0,
+                    help="beta: weight of the cross-entropy from a uniform target over the levels 0.0..1.0 to each "
+                         "row's level marginal (0 = off); keeps probability on every level so training cannot collapse")
     ap.add_argument("--ref-topk", default=None, help="ref_topk.py cache of --train for the penalty (default: live pass)")
     ap.add_argument("--max-prefix", type=int, default=4608)
     ap.add_argument("--train-problems", type=int, default=None,
@@ -245,6 +250,8 @@ def main():
                                 else "mehuldamani/big-math-digits-v2-brier-base-tabc")
     random.seed(args.seed); torch.manual_seed(args.seed)
     run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_W{args.answer_kl:g}_s{args.seed}"
+    if args.support_floor:
+        run_name += f"_F{args.support_floor:g}"
     if args.train_problems:
         run_name += f"_overfit{args.train_problems}"
     log_path = os.path.join(args.out, f"train_{run_name}.jsonl")
@@ -282,6 +289,7 @@ def main():
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch)
     values_gpu = values.cuda()
+    levels_gpu = level_matrix(values_gpu)
     ref_topk = RefTopk(args.ref_topk) if args.ref_topk else None
     if ref_topk:
         m = ref_topk.meta
@@ -333,6 +341,10 @@ def main():
                     for row, (j, reward) in zip(logps, draws[start: start + len(part)]):
                         logq = torch.log1p(-row.exp().sum().clamp(max=1 - 1e-6)) if j == len(row) else row[j]
                         loss = loss - (reward - baseline) * logq
+                if args.support_floor:
+                    floor = support_floor(logps, levels_gpu)
+                    loss = loss + args.support_floor * floor.sum()
+                    stats["support_floor"] += floor.sum().item() / n_rows
                 if args.answer_kl:
                     kl = answer_kl(model, states, part, ref_topk)
                     loss = loss + args.answer_kl * kl.sum()

@@ -66,6 +66,21 @@ def rlcr_reward(values: torch.Tensor, correct: torch.Tensor) -> torch.Tensor:
     return 0.5 * (1 + y + 1 - (y - values) ** 2)
 
 
+def level_matrix(values: torch.Tensor, levels: int = 11) -> torch.Tensor:
+    """[levels, K] 0/1: which candidates spell each of 0.0, 0.1, ..., 1.0 (all spellings of a value count)."""
+    grid = torch.linspace(0, 1, levels, dtype=values.dtype, device=values.device)
+    return ((values[None, :] - grid[:, None]).abs() < 1e-6).to(values.dtype)
+
+
+def support_floor(logps: torch.Tensor, levels: torch.Tensor) -> torch.Tensor:
+    """[rows] cross-entropy from a uniform target over the levels to each row's level marginal,
+    -mean_l log sum_{j in l} q_j. Its gradient on a level's logit is about q_l - 1/L, which does not vanish when q
+    is peaked (the expected reward's gradient on a candidate is proportional to its probability), so it keeps
+    some probability on every level. The uniform-mixture idea of ReFIne's confidence remap, as a regularizer."""
+    marginal = torch.logsumexp(logps[:, None, :] + levels.clamp_min(1e-30).log()[None], dim=-1)  # [rows, L]
+    return -marginal.mean(-1)
+
+
 def exact_objective(logps: torch.Tensor, values: torch.Tensor, correct: torch.Tensor) -> torch.Tensor:
     """Expected RLCR reward of the confidence completion: sum_j q_j R_j, with the unlisted mass earning 0."""
     return (logps.exp() * rlcr_reward(values, correct)).sum(-1)
