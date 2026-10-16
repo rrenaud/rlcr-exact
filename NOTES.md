@@ -300,9 +300,15 @@ at the position that writes the decimal digit (raw logprobs, temperature 1):
 - **Data:** `scripts/build_hotpot_fresh.py` rebuilds mehuldamani/hotpot_qa's prompts byte for byte
   (20,000/20,000). Fresh: 4,000 train + 1,000 dev distractor-train questions (gold_removed 0/1/2 in thirds),
   plus their 500-question test (the paper's in-domain HotpotQA-Modified eval).
-- **Scorer:** `--scorer hotpot`, 21 values (0.0–0.9, 0.05–0.95, 1.0) x {`Ġ 0 . d Ġ</`, `0 . d </`}
-  through a 93-node trie up to the closing token, which separates 0.7 from 0.75. It covers 1,024/1,024 sampled
-  untrained tails. The trie scorer now also returns hidden states for the answer-KL penalty.
+- **Scorer:** `--scorer hotpot`: 0.0–0.9, 0.05–0.95, the spellings 0.00–0.90 and 1.0 (31) x {`Ġ 0 . d Ġ</`,
+  `0 . d </`} = 62 candidates, through a trie up to the closing token, which separates 0.7 from 0.75. It
+  covers all but 0.04% of 16,000 fresh-train tails (before adding 0.d0 it missed 0.23%, mostly "0.10"). The
+  trie scorer also returns hidden states for the answer-KL penalty.
+- **Fresh train cache** (2,000 x 8, T=0.7): format ok 100%, accuracy 0.543, Brier 0.183, ECE 0.036, AUROC
+  0.797, accuracy by stated level close to the diagonal. At the tag digit, unselected mass is mean 0.389
+  (median 0.41), entropy 0.66 nats, and 0% of rows exceed 0.999. The analysis states the number in 0.1% of
+  rows, so the spread holds at scale. 21.9% of problems have mixed correctness, and within-problem AUROC
+  is 0.586 (436 problems): as for math, the headroom is discrimination.
 - Cache: gpuq `rlcr-hotpot-cache` / `run-20261016T003439Z-bc13159a85` (`scripts/cache_hotpot.sh`).
 - **Released RLCR-hotpot, reproduced** (paper's 500-question test, temperature 0): accuracy 0.435, Brier 0.196,
   ECE 0.084, AUROC 0.778, against the released eval's 0.444 / 0.188 / 0.078 / 0.798; format ok 99.8%, median
