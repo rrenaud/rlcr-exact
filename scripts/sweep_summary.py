@@ -2,7 +2,8 @@
 
 For every train_*.jsonl under the given run directories: the final dev metrics, eligibility (mass >= 0.99,
 greedy off-list <= 1%, not collapsed: greedy confidence sd >= 0.05 and greedy AUROC >= untrained - 0.02), answer
-drift as the change from step 0 (the metric has a bf16 floor), F1-label metrics alongside, and per objective
+Runs with fewer than 100 steps (smoke tests) are
+skipped. Answer drift is the change from step 0 (the metric has a bf16 floor), F1-label metrics alongside, and per objective
 the selected lr: lowest final dev greedy Brier among eligible runs, preferring the lower lr within 0.005.
 
 usage: sweep_summary.py RUN_DIR [...]
@@ -23,7 +24,7 @@ def main():
     for d in sys.argv[1:]:
         for path in glob.glob(os.path.join(d, "train_*.jsonl")):
             args, dev, test = load(path)
-            if len(dev) < 2:
+            if len(dev) < 2 or args["steps"] < 100:  # unfinished, or a smoke test
                 continue
             start, end = dev[0], dev[-1]
             eligible = (end["mass"] >= 0.99 and end["greedy_off_list"] <= 0.01 and end["greedy_sd"] >= 0.05
@@ -36,7 +37,7 @@ def main():
     cols = ("greedy_brier", "greedy_auroc", "greedy_ece", "expected_brier", "greedy_brier_f1", "greedy_auroc_f1")
     print(f"{'objective':8s} {'lr':>7s} {'seed':>4s} {'step':>5s} {'elig':>4s} " + " ".join(f"{c:>15s}" for c in cols) + f" {'drift':>7s}")
     for r in runs:
-        cells = " ".join(f"{r['start'][c]:.4f}->{r['end'][c]:.4f}" for c in cols)
+        cells = " ".join(f"{r['start'].get(c, float('nan')):.4f}->{r['end'].get(c, float('nan')):.4f}" for c in cols)
         print(f"{r['objective']:8s} {r['lr']:7.0e} {r['seed']:4d} {r['steps']:5d} {'yes' if r['eligible'] else 'NO':>4s} {cells} {r['drift']:7.3f}")
     for objective in sorted({r["objective"] for r in runs}):
         cands = [r for r in runs if r["objective"] == objective and r["eligible"] and r["finished"] and r["seed"] == 0]
