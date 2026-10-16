@@ -32,6 +32,8 @@ ap.add_argument("--model", default="mehuldamani/hotpot-v2-correctness-7b")
 ap.add_argument("--train", default=f"{C}/rollouts_hotpot_fresh_train.jsonl")
 ap.add_argument("--ref-topk", default=REF)
 ap.add_argument("--beta", type=float, default=0.03)
+ap.add_argument("--adapter", default=None, help="start from a trained train_frozen.py adapter instead of a fresh LoRA")
+ap.add_argument("--tag", default="start")
 ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
 a = ap.parse_args()
 random.seed(0); torch.manual_seed(0)
@@ -47,8 +49,12 @@ ref = RefTopk(a.ref_topk)
 
 model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.bfloat16, attn_implementation="sdpa", device_map={"": 0})
 model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-model = get_peft_model(model, LoraConfig(r=4, lora_alpha=4, lora_dropout=0.0, target_modules=LINEAR_MODULES,
-                                         layers_to_transform=list(range(14, model.config.num_hidden_layers))))
+if a.adapter:
+    from peft import PeftModel
+    model = PeftModel.from_pretrained(model, a.adapter, is_trainable=True)
+else:
+    model = get_peft_model(model, LoraConfig(r=4, lora_alpha=4, lora_dropout=0.0, target_modules=LINEAR_MODULES,
+                                             layers_to_transform=list(range(14, model.config.num_hidden_layers))))
 stop_backward_at_first_adapter(model)
 model.train()
 params = [p for p in model.parameters() if p.requires_grad]
@@ -67,12 +73,16 @@ t = time.time()
 for b in range(a.batches):
     batch = [groups[g] for g in ids[b * a.problems_per_step: (b + 1) * a.problems_per_step]]
     n_rows = sum(len(g) for g in batch)
-    for term in ("J", "KL", "floor"):
+    for term in ("J", "Jcal", "KL", "floor"):
         for group in batch:  # one packed forward per group, as in training; recomputed per term to separate grads
             logps, states = score(model, [r.prefix for r in group], hidden=True)
             if term == "J":
                 y = torch.tensor([r.correct for r in group], device=logps.device)
                 loss = -exact_objective(logps, values_gpu, y[:, None]).sum()
+            elif term == "Jcal":  # calibration only: expected Brier term under q renormalized over the list
+                y = torch.tensor([r.correct for r in group], device=logps.device, dtype=values_gpu.dtype)
+                q = (logps - torch.logsumexp(logps, -1, keepdim=True)).exp()
+                loss = -(q * 0.5 * (1 - (y[:, None] - values_gpu[None]) ** 2)).sum()
             elif term == "KL":
                 loss = answer_kl(model, states, group, ref).sum()
             else:
@@ -97,15 +107,16 @@ def stats(gs):
                 adam_fraction_median=adam[nz].median().item(), adam_fraction_mean=adam[nz].mean().item())
 
 
-report = dict(batches=a.batches, rows_per_batch=sum(len(groups[g]) for g in ids) / a.batches, params=len(grads["J"][0]),
+report = dict(tag=a.tag, adapter=a.adapter, batches=a.batches, rows_per_batch=sum(len(groups[g]) for g in ids) / a.batches, params=len(grads["J"][0]),
               beta=a.beta)
-for term in ("J", "KL", "floor"):
+for term in ("J", "Jcal", "KL", "floor"):
     report[term] = stats(grads[term])
+report["Jcal+KL"] = stats([j + k for j, k in zip(grads["Jcal"], grads["KL"])])
 report["J+KL"] = stats([j + k for j, k in zip(grads["J"], grads["KL"])])
 report["J+KL+floor"] = stats([j + k + f for j, k, f in zip(grads["J"], grads["KL"], grads["floor"])])
-mj, mk, mf = (torch.stack(grads[t]).mean(0) for t in ("J", "KL", "floor"))
+mj, mk, mf, mc = (torch.stack(grads[t]).mean(0) for t in ("J", "KL", "floor", "Jcal"))
 cos = lambda u, v: (u @ v / (u.norm() * v.norm()).clamp_min(1e-30)).item()
-report["cos_mean_J_KL"], report["cos_mean_J_floor"] = cos(mj, mk), cos(mj, mf)
+report["cos_mean_J_KL"], report["cos_mean_J_floor"], report["cos_mean_J_Jcal"] = cos(mj, mk), cos(mj, mf), cos(mj, mc)
 print(json.dumps(report, indent=1), flush=True)
-with open(os.path.join(a.out, "grad_check.json"), "w") as f:
+with open(os.path.join(a.out, f"grad_check_{a.tag}.json"), "w") as f:
     json.dump(report, f, indent=1)
