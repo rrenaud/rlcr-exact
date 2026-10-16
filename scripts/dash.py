@@ -69,9 +69,10 @@ def queue():
 
 
 @st.fragment(run_every=60)
-def body(chosen, show_small, text, split, smooth):
+def body(chosen, show_small, text, hide, split, smooth):
     all_runs = runs()
     sel = [r for r in all_runs if r["experiment"] in chosen and text in r["label"]
+           and not hide & set(r["label"].split())
            and (show_small or (r["args"].get("steps", 0) >= 100 and not r["args"].get("train_problems")))]
 
     keys = name_runs(sel)
@@ -187,7 +188,8 @@ with st.sidebar:
     chosen = st.multiselect("Experiments", experiments, default=[e for e in experiments if "rlvr-frozen" in e] or experiments)
     show_small = st.checkbox("Include smoke/overfit runs", value=False)
     text = st.text_input("Label filter (substring)", "")
+    hide = set(st.text_input("Hide runs with any of these settings (space-separated, e.g. W=1 obj=sampled)", "W=1").split())
     split = st.radio("Eval split (dev every 100 steps; test at the end)", ["dev", "train", "test"], horizontal=True)
     smooth = st.slider("Train-curve smoothing (log points)", 1, 20, 5)
     st.caption("Refreshes every 60 s.")
-body(chosen, show_small, text, split, smooth)
+body(chosen, show_small, text, hide, split, smooth)
