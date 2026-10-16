@@ -9,7 +9,7 @@ wait_for "$after"
 for cfg in "$@"; do
   set -- $cfg
   obj=$1 lr=$2 seed=$3; shift 3
-  id=$(gpuq submit --experiment rlcr-math-frozen --description "Stage A sweep: ${TASK:-math}, $obj, lr $lr, seed $seed, 500 steps $* $SWEEP_ARGS" \
+  id=$(gpuq submit --experiment rlcr-${TASK:-math}-frozen --description "Stage A sweep: ${TASK:-math}, $obj, lr $lr, seed $seed, 500 steps $* $SWEEP_ARGS" \
         --expected-minutes 120 --cwd /home/rrenaud/rlcr-exact -- /usr/bin/env TASK=${TASK:-math} /bin/bash scripts/run_frozen.sh $obj $lr $seed "$@" $SWEEP_ARGS 2>&1 | tail -1)
   echo "$(date -u +%H:%M) submitted $cfg as $id"
   wait_for "$id"

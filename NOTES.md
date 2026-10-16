@@ -348,6 +348,25 @@ at the position that writes the decimal digit (raw logprobs, temperature 1):
   reference, and selects on dev greedy Brier (EM labels). The lr grid is {1e-4, 3e-4, 1e-3} x {exact, sampled},
   seed 0, then seeds 1-2 at each objective's pick.
 
+## Packed shared-prefix scoring (2026-10-16)
+
+`trie_score.packed_candidate_logps`: a question's 8 rollouts go into one sequence (shared prompt once, then each
+row's suffix and its trie nodes, with a block mask and each row's own positions). The trie scorers always use
+it, and their default micro-batch is the whole group.
+- **Exact in fp32:** CPU tests on a tiny model, and on GPU with Qwen2.5-0.5B on real HotpotQA groups
+  (gpuq `run-20261016T034417Z-a2eac8d77a`): probabilities identical, greedy 100%, gradient cosine 1.000,
+  relative difference 9e-5.
+- **bf16 noise, not error:** on the 7B (`run-20261016T031122Z-6c52ffb8a7`) packed vs per-row differ by up to
+  0.06 in a candidate probability, agree on 87.5% of greedy picks (32 rows) and have gradient cosine 0.971 (relative
+  difference 0.24). The 0.5B in bf16 shows the same gradient noise (cosine 0.962, relative difference 0.44), so
+  neither bf16 path is closer to the truth. The 20-step run's step-10 expected reward equals the per-row run's
+  to 4 decimals (1.0749).
+- **Speed:** 0.285 -> 0.093 s per row without grad, 5.8 -> 2.0 s per group forward+backward. **20.8 -> 7.0 s per
+  32-row step** (peak 17.0 GB).
+- The sweep's first run (exact 3e-4, per-row code, `run-20261016T021907Z-c918d9854a`) was cancelled at step 200
+  so that all six runs use the packed code. Its dev evals at steps 0/100 are in its log. It ran under
+  experiment `rlcr-math-frozen` because sweep_chain.sh hard-coded that name, now fixed.
+
 ## Next steps
 
 1. ~~Analyze the cache~~ (done: see "Fresh train rollouts" above).

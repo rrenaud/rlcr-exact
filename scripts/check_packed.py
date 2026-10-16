@@ -1,7 +1,8 @@
 """Packed shared-prefix scoring vs per-row scoring on the real checkpoint (bf16): values, greedy, gradients, time.
 
-usage: check_packed.py ROLLOUTS_JSONL [--groups 4] [--scorer hotpot]
-Writes $GPUQ_RUN_DIR/check_packed.json.
+usage: check_packed.py ROLLOUTS_JSONL [--groups 4] [--scorer hotpot] [--model NAME] [--dtype bfloat16|float32]
+--model swaps in another Qwen2.5 (same tokenizer), e.g. Qwen/Qwen2.5-0.5B in float32, to separate bf16 noise
+from a packing error on real sequence lengths. Writes $GPUQ_RUN_DIR/check_packed_<model>_<dtype>.json.
 """
 import argparse, collections, json, os, sys, time
 
@@ -19,20 +20,23 @@ ap = argparse.ArgumentParser()
 ap.add_argument("rollouts")
 ap.add_argument("--scorer", default="hotpot", choices=["hotpot", "trie"])
 ap.add_argument("--groups", type=int, default=4)
+ap.add_argument("--model", default=None)
+ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"])
 ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
 a = ap.parse_args()
 name = "mehuldamani/hotpot-v2-brier-7b-no-split" if a.scorer == "hotpot" else "mehuldamani/big-math-digits-v2-brier-base-tabc"
-tok = AutoTokenizer.from_pretrained(name)
+tok = AutoTokenizer.from_pretrained(name)  # the rows' tokenizer; --model must share it
+name = a.model or name
 trie = (hotpot_candidates(tok) if a.scorer == "hotpot" else make_candidates(tok)).trie
 groups = collections.defaultdict(list)
 for r in load_rows(a.rollouts, make_token_bytes(tok), 4608)[0]:
     groups[r.qid].append(r)
 groups = [g for g in groups.values() if len(g) == 8][: a.groups]
 
-model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16, attn_implementation="sdpa", device_map={"": 0})
+model = AutoModelForCausalLM.from_pretrained(name, dtype=getattr(torch, a.dtype), attn_implementation="sdpa", device_map={"": 0})
 model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 model = get_peft_model(model, LoraConfig(r=4, lora_alpha=4, target_modules=LINEAR_MODULES, init_lora_weights=False,
-                                         layers_to_transform=list(range(14, model.config.num_hidden_layers))))
+                                         layers_to_transform=list(range(model.config.num_hidden_layers // 2, model.config.num_hidden_layers))))
 stop_backward_at_first_adapter(model)
 
 
@@ -43,7 +47,7 @@ def timed(fn):
     return out, time.time() - t
 
 
-report = dict(groups=len(groups), rows=sum(len(g) for g in groups))
+report = dict(model=name, dtype=a.dtype, groups=len(groups), rows=sum(len(g) for g in groups))
 diffs, greedy_agree, t_row, t_pack = [], 0, 0.0, 0.0
 model.eval()
 with torch.no_grad():
@@ -80,5 +84,5 @@ report |= dict(grad_cosine=torch.nn.functional.cosine_similarity(a_, b_, dim=0).
                grad_rel_diff=((a_ - b_).norm() / a_.norm()).item(),
                seconds_fwd_bwd_group=seconds)
 print(json.dumps(report, indent=1), flush=True)
-with open(os.path.join(a.out, "check_packed.json"), "w") as f:
+with open(os.path.join(a.out, f"check_packed_{name.split('/')[-1]}_{a.dtype}.json"), "w") as f:
     json.dump(report, f, indent=1)
