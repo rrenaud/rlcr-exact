@@ -234,6 +234,9 @@ def main():
     ap.add_argument("--answer-kl", type=float, default=1.0, help="W: weight of the answer-KL penalty (0 = off)")
     ap.add_argument("--ref-topk", default=None, help="ref_topk.py cache of --train for the penalty (default: live pass)")
     ap.add_argument("--max-prefix", type=int, default=4608)
+    ap.add_argument("--train-problems", type=int, default=None,
+                    help="overfit check: train on only the first N problems (sorted id) with mixed correctness, "
+                         "and also evaluate on their rows (split 'train')")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     args = ap.parse_args()
@@ -242,6 +245,8 @@ def main():
                                 else "mehuldamani/big-math-digits-v2-brier-base-tabc")
     random.seed(args.seed); torch.manual_seed(args.seed)
     run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_W{args.answer_kl:g}_s{args.seed}"
+    if args.train_problems:
+        run_name += f"_overfit{args.train_problems}"
     log_path = os.path.join(args.out, f"train_{run_name}.jsonl")
 
     def log(**rec):
@@ -260,6 +265,9 @@ def main():
     for row in train:
         groups[row[0]].append(row)
     group_ids = sorted(groups)
+    if args.train_problems:
+        group_ids = [g for g in group_ids if 0 < np.mean([r.correct for r in groups[g]]) < 1][: args.train_problems]
+        train = [r for g in group_ids for r in groups[g]]
     log(event="data", train_rows=len(train), train_problems=len(groups), dropped=dropped, dev_rows=len(dev),
         dev_dropped=dev_dropped, test_rows=len(test) if test else 0, **scorer_info, args=vars(args))
 
@@ -282,7 +290,11 @@ def main():
         assert all((r.qid, r.j) in ref_topk.index for r in train), "--ref-topk is missing training rows"
 
     drift_rows = dev[: args.drift_rows]
-    evaluate_dev = lambda: evaluate(model, dev, values, score, args.eval_batch, drift_rows)
+    def evaluate_dev():
+        if args.train_problems:
+            log(event="eval", step=step, split="train", **evaluate_on(train))
+        return evaluate(model, dev, values, score, args.eval_batch, drift_rows)
+    step = 0
     log(event="eval", step=0, split="dev", **evaluate_dev())
     order, t0 = [], time.time()
     for step in range(1, args.steps + 1):
