@@ -541,6 +541,23 @@ W 0.0045-0.03; the generation check, not Brier, separates them.
 Round 2 centers: exact W 0.03 F 0.03 + WSD; exact W 0.02 F 0.06; exact lr 1.5e-4 W 0.02; sampled lr 1e-4 W 0.03;
 sampled 3e-4 W 0.03 + WSD; sampled 2e-4 W 0.1 F 0.06.
 
+## Overnight search, round 2 (2026-10-17)
+
+- **New best exact:** lr 3.7e-4, W 0.02, F 0.053: dev 0.173 / 0.807, test 0.208 / 0.775, KL 0.26, generation accuracy
+  +5.4 points dev and test (format +9 / +6). A larger floor again helps format.
+- exact lr 1.3e-4, W 0.031, F 0.024: dev 0.178 / 0.800, the lowest KL of the eligible runs (0.18).
+- exact with WSD (lr 3.7e-4, W 0.035, F 0.024, warmup 17, decay 0.23): dev 0.187, format -2.4 points. No gain from
+  the schedule in this one seed.
+- **Sampled is squeezed between slow and drifting.** lr 8.5e-5 (W 0.047): dev 0.268 / 0.660, still near
+  collapse; lr 1.5e-4 with W 0.12, F 0.082: dev 0.347 / 0.559, barely moved. lr 4.5e-4 WSD with F 0.018: dev 0.206
+  / 0.753, the best sampled Brier, but generation format -6.6 / -4.8 points (low floor). The best eligible sampled run
+  is still lr 3e-4, W 0.01, F 0.03 (dev 0.228 / 0.768).
+- Exact vs sampled so far (best eligible, seed 0): dev Brier 0.173 vs 0.228, AUROC 0.807 vs 0.768; test 0.208 vs
+  0.274.
+
+Round 3: seeds 1 and 2 of the best exact config (no jitter); sampled around lr 3e-4..6e-4 with W 0.02-0.05 and F
+0.06 (more floor for format, more W against drift); exact with F 0.1.
+
 ## Next steps (2026-10-17)
 
 In the queue (gpuq, `rlcr-hotpot-rlvr-*`):
