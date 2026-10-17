@@ -5,7 +5,7 @@
 # usage: gen_eval.sh ADAPTER_DIR|none BASE_CACHE_DIR OUT_DIR [--model M]   (--model omitted = released RLCR-hotpot)
 # ADAPTER none regenerates the base policy: the run-to-run noise floor of answer_changed (vLLM batching).
 adapter=$1 base=$2 out=$3/gen_eval; shift 3
-export HF_HOME=/home/rrenaud/.cache/huggingface HF_DATASETS_CACHE=/home/rrenaud/.cache/huggingface/datasets HF_HUB_OFFLINE=1
+export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_CACHE=/scratch/hf/hub HF_DATASETS_CACHE=/home/rrenaud/.cache/huggingface/datasets HF_HUB_OFFLINE=1
 mkdir -p "$out"
 PY="timeout 3600 /home/rrenaud/envs/vllm/bin/python /home/rrenaud/rlcr-exact/rlcr-reward-conf-weighted-tt-scaling/rollout_vllm.py --rlcr /home/rrenaud/rlcr_platt/RLCR --task hotpot --util 0.85 $([ "$adapter" != none ] && echo --adapter $adapter) $*"
 for split in dev test; do

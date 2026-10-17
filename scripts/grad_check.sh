@@ -1,7 +1,7 @@
 #!/bin/bash
 # gpuq payload for grad_check.py (RLVR-hotpot, full training data): the untrained start, then the step-500 adapters
 # of the exact 3e-4 runs without and with the support floor.
-export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_CACHE=/scratch/hf/hub HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 PY="timeout 2400 /home/rrenaud/envs/pytorch/bin/python scripts/grad_check.py"
 F=/data/gpuq-runs/rrenaud/rlcr-hotpot-rlvr-frozen
 $PY --tag start || echo "FAILED start"

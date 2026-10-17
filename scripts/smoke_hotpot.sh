@@ -1,7 +1,7 @@
 #!/bin/bash
 # gpuq payload: the HotpotQA top-64 reference cache for the training rows, a check that the hotpot scorer
 # reproduces vLLM's greedy confidences on the paper's test, then 3 training steps per objective with the cache.
-export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_CACHE=/scratch/hf/hub HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 PY="timeout 3600 /home/rrenaud/envs/pytorch/bin/python"
 C=/data/gpuq-runs/rrenaud/rlcr-hotpot-cache/run-20261016T003439Z-bc13159a85
 M=mehuldamani/hotpot-v2-brier-7b-no-split

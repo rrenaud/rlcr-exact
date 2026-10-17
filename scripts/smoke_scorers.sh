@@ -1,7 +1,7 @@
 #!/bin/bash
 # GPU smoke for the confidence scorers on the untrained RLCR-math checkpoint: trie vs digit agreement on 300
 # greedy test prefixes, then 3 training steps (1 problem x 8 rollouts each) per scorer x objective.
-export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_CACHE=/scratch/hf/hub HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 PY="timeout 1800 /home/rrenaud/envs/pytorch/bin/python"
 C=/data/gpuq-runs/rrenaud/rlcr-math-cache/run-20261015T212410Z-d16f220bfe
 $PY scripts/compare_scorers.py $C/rollouts_math_fresh_test.jsonl --rows 300 --digit-batch 8 || echo "FAILED compare"

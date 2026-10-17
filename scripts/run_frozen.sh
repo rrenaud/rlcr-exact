@@ -1,6 +1,6 @@
 #!/bin/bash
 # One Stage A run (gpuq payload): [TASK=math|hotpot|hotpot-rlvr] run_frozen.sh OBJECTIVE LR SEED [extra train_frozen.py args]
-export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_CACHE=/scratch/hf/hub HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 if [ "${TASK:-math}" = hotpot-rlvr ] || [ "${TASK:-math}" = hotpot-rlvr-stop ]; then  # uncalibrated start: RLVR-hotpot
   C=/data/gpuq-runs/rrenaud/rlcr-hotpot-rlvr-cache/run-20261016T073943Z-04bf759137; T=hotpot
   # hotpot-rlvr-stop scores the end token after </confidence> and keeps tail-fault rows (pass its --ref-topk)
