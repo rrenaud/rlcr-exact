@@ -532,8 +532,9 @@ given format. The base regeneration (no adapter) is the noise floor.
   format -1.3 / -4.6 points, where F 0.03 at the same W gained +6 / +8.
 - sampled, W 0.003 -> lr 4.4e-4, W 0.0016, F 0.022: dev 0.243 / 0.630, KL 1.08, accuracy -5 points. Out.
 
-Read: (1) the floor also protects the format: its CE on the level marginal pushes mass back onto the list, so a
-smaller floor loses format in generation even at the same answer KL. (2) Sampled drifts the answers much more than
+Read: (1) a smaller floor lost format in generation at the same answer KL. (Correction: not through the
+confidence list. Scored mass on the list is 1.000 by step 100 with any floor, since off-list earns 0 in the
+objective. The format failures come from the LoRA acting on the generated reasoning. One seed; may be noise.) (2) Sampled drifts the answers much more than
 exact at the same W (1.1-1.3 nats vs 0.3-0.7): its noisier gradient random-walks the shared LoRA. Sampled needs a
 larger W or a smaller lr. (3) On dev Brier, exact sits on a plateau around 0.175-0.178 for lr 2.7e-4..4.4e-4 and
 W 0.0045-0.03; the generation check, not Brier, separates them.
@@ -557,6 +558,20 @@ sampled 3e-4 W 0.03 + WSD; sampled 2e-4 W 0.1 F 0.06.
 
 Round 3: seeds 1 and 2 of the best exact config (no jitter); sampled around lr 3e-4..6e-4 with W 0.02-0.05 and F
 0.06 (more floor for format, more W against drift); exact with F 0.1.
+
+## Does the floor need to stay on? (2026-10-17)
+
+Gradient logs of the best run (F 0.053) and of F 0.0077:
+- Early (steps 25-100) the floor and the objective point in different directions (cos -0.5 to -0.7), but the
+  floor's job there is to put mass on empty levels (smallest level mass 0 -> 0.002-0.012 by step 100-200) so
+  the objective's gradient, which scales with q, can reach them.
+- Late (steps 300-500) the cosine is -0.6 to -0.94: the floor mostly opposes the objective. The exact objective
+  is linear in q, so its optimum per row is a point mass; the floor holds an equilibrium spread of roughly
+  (1/11) beta / (delta + beta) per level. That is a tax on expected reward (at most ~beta) and does not change the greedy
+  readout much.
+- Hypothesis: the floor is a startup aid plus insurance while the readout is moving; annealing it late should keep
+  the gain and cut the tax. Test: `--floor-decay-from 0.2` and `0.6` (beta linear to 0 from step 100 / 300) at the
+  best exact config, against its seeds 0-2 with a constant floor.
 
 ## Next steps (2026-10-17)
 
