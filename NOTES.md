@@ -498,6 +498,30 @@ the objective through:
 Dev accuracy 0.548, test 0.452, so test confidence runs high. The answer KL is not monotone in W.
 Sampled at W=0.01 is the matched comparison.
 
+## Generation check: accuracy vs answer KL (2026-10-17)
+
+Greedy vLLM generation of fresh dev (1000) and test (500) with the adapter on, against the base policy's cached
+rollouts (`gen_eval.sh`). Accuracy counts a format failure as wrong, so it splits into format rate x accuracy
+given format. The base regeneration (no adapter) is the noise floor.
+
+| run | dev answer KL | dev format | dev acc | dev acc given format | answers changed dev/test | right->wrong dev | test acc |
+|---|---|---|---|---|---|---|---|
+| base regen (no adapter) | 0 | 0.778 -> 0.778 | 0.426 -> 0.429 | 0.548 -> 0.551 | 0.05 / 0.07 | 0.029 | 0.350 -> 0.338 |
+| exact W=0.03 | 0.23 | -> 0.889 | -> 0.495 | -> 0.557 | 0.07 / 0.09 | 0.012 | -> 0.426 |
+| sampled W=0.01 | 0.28 | -> 0.814 | -> 0.452 | -> 0.555 | 0.10 / 0.11 | 0.033 | -> 0.366 |
+| exact W=0.01 | 0.29 | -> 0.842 | -> 0.471 | -> 0.559 | 0.10 / 0.13 | 0.020 | -> 0.412 |
+| exact W=0.1 | 0.38 | -> 0.846 | -> 0.460 | -> 0.544 | 0.13 / 0.16 | 0.023 | -> 0.348 |
+| exact lr 4.4e-4, W=0.0045 (jittered) | 0.66 | -> 0.750 | -> 0.442 | -> 0.589 | 0.15 / 0.20 | 0.044 | -> 0.358 |
+| sampled lr 1.4e-3, W=0.011 (jittered) | 1.27 | -> 0.685 | -> 0.370 | -> 0.540 | 0.20 / 0.24 | 0.095 | -> 0.322 |
+
+- Up to ~0.4 nats the adapter *raises* accuracy, all through format: RLVR often fails RLCR's format check
+  (the off-list `" 1 "` confidence), and training on the confidence fixes it. Accuracy given format stays at the base
+  level within noise.
+- Above that, format breaks and answers change: at 0.66 nats format falls 3-4 points; at 1.27 nats dev accuracy
+  drops 5.6 points, right->wrong flips triple the noise floor.
+- Rule for the search: a run is eligible only if generation accuracy and format are not below base by more than
+  the control's spread (~0.01-0.02), and its dev answer KL stays under ~0.5 nats. Keep W >= ~0.01 and lr <= ~5e-4.
+
 ## Next steps (2026-10-17)
 
 In the queue (gpuq, `rlcr-hotpot-rlvr-*`):
