@@ -297,6 +297,10 @@ def main():
     ap.add_argument("--lora-first-layer", type=int, default=14, help="adapt only layers >= this one (Qwen2.5-7B has 28)")
     ap.add_argument("--problems-per-step", type=int, default=4, help="problems per update (x their rollouts each)")
     ap.add_argument("--steps", type=int, default=500)
+    ap.add_argument("--init-adapter", default=None,
+                    help="continue from a saved adapter dir (and its optimizer.pt, if there) instead of a fresh LoRA")
+    ap.add_argument("--save-every", type=int, default=0,
+                    help="also save adapter + optimizer state every N steps, to checkpoints/RUN/stepN")
     ap.add_argument("--eval-every", type=int, default=100)
     ap.add_argument("--dev-limit", type=int, default=None)
     ap.add_argument("--drift-rows", type=int, default=200, help="dev rows for the answer-KL metric (0 = off)")
@@ -330,6 +334,8 @@ def main():
         run_name += f"_F{args.support_floor:g}"
         if args.floor_decay_from is not None:
             run_name += f"-anneal{args.floor_decay_from:g}"
+    if args.init_adapter:
+        run_name += "_cont"
     if args.samples_per_row > 1:
         run_name += f"_k{args.samples_per_row}"
     if args.warmup_steps or args.decay_frac:
@@ -364,15 +370,27 @@ def main():
                                                  device_map={"": 0})
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     layers = list(range(args.lora_first_layer, model.config.num_hidden_layers))
-    model = get_peft_model(model, LoraConfig(r=args.lora_r, lora_alpha=args.lora_r, lora_dropout=0.0,
-                                             target_modules=LINEAR_MODULES, layers_to_transform=layers))
+    if args.init_adapter:
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, args.init_adapter, is_trainable=True)
+    else:
+        model = get_peft_model(model, LoraConfig(r=args.lora_r, lora_alpha=args.lora_r, lora_dropout=0.0,
+                                                 target_modules=LINEAR_MODULES, layers_to_transform=layers))
     stop_backward_at_first_adapter(model)
     model.train()
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
+    opt_path = os.path.join(args.init_adapter or "", "optimizer.pt")
+    if args.init_adapter and os.path.exists(opt_path):
+        opt.load_state_dict(torch.load(opt_path))
+        for g in opt.param_groups:
+            g["lr"] = g["initial_lr"] = args.lr
     decay_start = args.steps * (1 - args.decay_frac)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda i: min(  # i = updates done so far
         (i + 1) / args.warmup_steps if args.warmup_steps else 1.0,
         (args.steps - i) / (args.steps - decay_start) if args.decay_frac and i >= decay_start else 1.0))
+    def save(path):  # adapter + Adam state, so a run can be continued (--init-adapter path)
+        model.save_pretrained(path)
+        torch.save(opt.state_dict(), os.path.join(path, "optimizer.pt"))
     evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch)
     values_gpu = values.cuda()
     levels_gpu = level_matrix(values_gpu)
@@ -450,9 +468,11 @@ def main():
                 adam_fraction=adam_fraction(opt), **{k: round(v, 4) for k, v in stats.items()})
         if step % args.eval_every == 0 or step == args.steps:
             log(event="eval", step=step, split="dev", **evaluate_dev())
+        if args.save_every and step % args.save_every == 0 and step < args.steps:
+            save(os.path.join(args.out, "checkpoints", run_name, f"step{step}"))
     if test:
         log(event="eval", step=args.steps, split="test", **evaluate_on(test))
-    model.save_pretrained(os.path.join(args.out, "checkpoints", run_name))
+    save(os.path.join(args.out, "checkpoints", run_name))
 
 
 if __name__ == "__main__":

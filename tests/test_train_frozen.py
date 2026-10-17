@@ -195,3 +195,20 @@ def test_floor_weight_anneals_linearly():
     a.floor_decay_from = 0.6
     w = [train_frozen.floor_weight(a, s) for s in (1, 300, 400, 500)]
     assert w[0] == w[1] == 0.05 and abs(w[2] - 0.025) < 1e-12 and w[3] == 0
+
+
+def test_adapter_and_optimizer_round_trip(tmp_path):
+    from peft import LoraConfig, PeftModel, get_peft_model
+    model = get_peft_model(tiny_model(), LoraConfig(r=2, lora_alpha=2, target_modules=train_frozen.LINEAR_MODULES))
+    params = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.Adam(params, lr=1e-2)
+    for _ in range(2):
+        model(torch.tensor([[1, 2, 3]])).logits.sum().backward()
+        opt.step(); opt.zero_grad()
+    model.save_pretrained(tmp_path); torch.save(opt.state_dict(), tmp_path / "optimizer.pt")
+    again = PeftModel.from_pretrained(tiny_model(), tmp_path, is_trainable=True)
+    params2 = [p for p in again.parameters() if p.requires_grad]
+    assert len(params2) == len(params) and all(torch.equal(a, b) for a, b in zip(params, params2))
+    opt2 = torch.optim.Adam(params2, lr=1e-2)
+    opt2.load_state_dict(torch.load(tmp_path / "optimizer.pt"))
+    assert all(torch.equal(opt.state[a]["exp_avg_sq"], opt2.state[b]["exp_avg_sq"]) for a, b in zip(params, params2))
