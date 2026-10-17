@@ -448,3 +448,20 @@ RLCR-hotpot was trained from Qwen2.5-7B base (`configs/Qwen-7B/hotpot/RLCR.yaml`
    were replaced), then repeat stages A and B with `hotpot-v2-brier-7b-no-split`.
 8. Open checks: confirm the math seen/unseen split against their wandb generations. Decide whether the
    expected confidence (not only greedy) is worth reporting as a cheap readout.
+
+### Lowering the answer-KL weight (RLVR start, exact 3e-4, floor 0.03, 500 steps, seed 0)
+
+The step-0 KL against the unpacked reference is about 0.1 nats of bf16/packing mismatch, and its gradient is noise
+(batch-to-batch cosine about 0.02). At W=1 it swamps the calibration gradient and training stalls. Lowering W lets
+the objective through:
+
+| W | dev Brier | dev AUROC | mean conf (correct / wrong) | test Brier | test AUROC | dev answer KL |
+|---|---|---|---|---|---|---|
+| untrained | 0.414 | 0.548 | 0.968 / 0.954 | | | 0.097 |
+| 1 | 0.408 | 0.567 | | 0.491 | 0.538 | 0.127 |
+| 0.1 | 0.192 | 0.800 | 0.811 / 0.513 | 0.241 | 0.764 | 0.380 |
+| 0.03 | 0.178 | 0.799 | 0.747 / 0.393 | 0.216 | 0.765 | 0.230 |
+| 0.01 | 0.175 | 0.809 | 0.725 / 0.361 | 0.205 | 0.782 | 0.287 |
+
+Dev accuracy 0.548, test 0.452, so test confidence runs high. The answer KL is not monotone in W.
+Sampled at W=0.01 is the matched comparison.
