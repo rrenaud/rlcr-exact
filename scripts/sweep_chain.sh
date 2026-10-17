@@ -8,8 +8,10 @@ wait_for "$after"
 # Each config is "OBJ LR SEED [extra train_frozen.py args]"; $SWEEP_ARGS is appended to every run.
 # JITTER=S (e.g. 0.35) multiplies lr and the loss/schedule knobs by exp(N(0, S)) at submit time (jitter.py), so a
 # config is a center to explore around; the submitted values are in the echo line and the run's own args.
+# A config starting with "= " is submitted exactly (seed replicates of a chosen point).
 for cfg in "$@"; do
-  [ -n "$JITTER" ] && cfg=$(python3 /home/rrenaud/rlcr-exact/scripts/jitter.py $JITTER "$cfg")
+  if [ "${cfg:0:2}" = "= " ]; then cfg=${cfg:2}
+  elif [ -n "$JITTER" ]; then cfg=$(python3 /home/rrenaud/rlcr-exact/scripts/jitter.py $JITTER "$cfg"); fi
   set -- $cfg
   obj=$1 lr=$2 seed=$3; shift 3
   id=$(gpuq submit --experiment rlcr-${TASK:-math}-frozen --description "Stage A sweep: ${TASK:-math}, $obj, lr $lr, seed $seed, 500 steps $* $SWEEP_ARGS" \
