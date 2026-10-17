@@ -522,6 +522,25 @@ given format. The base regeneration (no adapter) is the noise floor.
 - Rule for the search: a run is eligible only if generation accuracy and format are not below base by more than
   the control's spread (~0.01-0.02), and its dev answer KL stays under ~0.5 nats. Keep W >= ~0.01 and lr <= ~5e-4.
 
+## Overnight search, round 1 (jittered, 2026-10-17)
+
+`hp_table.py` ranks every run. Round 1 (centers -> submitted values):
+- exact, W 0.003 -> lr 4.4e-4, W 0.0045, F 0.028: dev 0.176 / 0.812, test 0.201 / 0.781, but answer KL 0.66 and
+  generation format -2.8 (dev) / -4.2 (test) points. Ineligible by the generation rule.
+- sampled, lr 1e-3 -> 1.4e-3, W 0.011, F 0.041: dev 0.201 / 0.716, KL 1.27, generation accuracy -5.6 points. Out.
+- exact, F 0.01 -> lr 2.7e-4, W 0.011, F 0.0077: dev 0.176 / 0.807, test 0.208 / 0.777, KL 0.30, but generation
+  format -1.3 / -4.6 points, where F 0.03 at the same W gained +6 / +8.
+- sampled, W 0.003 -> lr 4.4e-4, W 0.0016, F 0.022: dev 0.243 / 0.630, KL 1.08, accuracy -5 points. Out.
+
+Read: (1) the floor also protects the format: its CE on the level marginal pushes mass back onto the list, so a
+smaller floor loses format in generation even at the same answer KL. (2) Sampled drifts the answers much more than
+exact at the same W (1.1-1.3 nats vs 0.3-0.7): its noisier gradient random-walks the shared LoRA. Sampled needs a
+larger W or a smaller lr. (3) On dev Brier, exact sits on a plateau around 0.175-0.178 for lr 2.7e-4..4.4e-4 and
+W 0.0045-0.03; the generation check, not Brier, separates them.
+
+Round 2 centers: exact W 0.03 F 0.03 + WSD; exact W 0.02 F 0.06; exact lr 1.5e-4 W 0.02; sampled lr 1e-4 W 0.03;
+sampled 3e-4 W 0.03 + WSD; sampled 2e-4 W 0.1 F 0.06.
+
 ## Next steps (2026-10-17)
 
 In the queue (gpuq, `rlcr-hotpot-rlvr-*`):
