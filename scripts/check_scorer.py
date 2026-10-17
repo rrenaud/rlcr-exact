@@ -16,19 +16,22 @@ from train_frozen import evaluate, load_rows, make_scorer, make_token_bytes
 
 ap = argparse.ArgumentParser()
 ap.add_argument("rollouts")
-ap.add_argument("--scorer", required=True, choices=["digit", "trie", "hotpot"])
+ap.add_argument("--scorer", required=True, choices=["digit", "trie", "hotpot", "hotpot-stop"])
 ap.add_argument("--model", default=None)
 ap.add_argument("--rows", type=int, default=500)
 ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
 a = ap.parse_args()
-a.model = a.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if a.scorer == "hotpot"
+a.model = a.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if a.scorer.startswith("hotpot")
                       else "mehuldamani/big-math-digits-v2-brier-base-tabc")
 
 tok = AutoTokenizer.from_pretrained(a.model)
-rows = load_rows(a.rollouts, make_token_bytes(tok), 4608)[0][: a.rows]
-stated = {}
+stop = a.scorer == "hotpot-stop"  # rows ending in junk after </confidence> are kept; greedy must leave the list there
+rows = load_rows(a.rollouts, make_token_bytes(tok), 4608, tail_ok=stop)[0][: a.rows]
+stated, faulted = {}, set()
 for q in map(json.loads, open(a.rollouts)):
     for j, text in enumerate(q["outputs"]):
+        if not q["format_ok"][j]:
+            faulted.add((q["id"], j))
         found = re.findall(r"<confidence>(.*?)</confidence>", text, re.S)
         try:
             stated[(q["id"], j)] = float(found[-1])
@@ -37,15 +40,19 @@ for q in map(json.loads, open(a.rollouts)):
 values, score, info = make_scorer(a.scorer, tok)
 model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.bfloat16, attn_implementation="sdpa", device_map={"": 0}).eval()
 
-agree, mass, t = 0, [], time.time()
+agree, mass, mass_fault, t = 0, [], [], time.time()
 with torch.no_grad():
     for r in rows:
         logps, picks = score(model, [r.prefix], greedy=True)
-        mass.append(logps.exp().sum().item())
-        agree += picks[0] is not None and abs(values[picks[0]].item() - stated.get((r.qid, r.j), -1)) < 1e-6
+        (mass_fault if (r.qid, r.j) in faulted else mass).append(logps.exp().sum().item())
+        if (r.qid, r.j) in faulted:  # vLLM wrote junk instead of stopping: greedy along the trie should leave it
+            agree += picks[0] is None
+        else:
+            agree += picks[0] is not None and abs(values[picks[0]].item() - stated.get((r.qid, r.j), -1)) < 1e-6
 seconds = (time.time() - t) / len(rows)
 report = dict(scorer=a.scorer, model=a.model, rows=len(rows), **info, greedy_matches_vllm=agree / len(rows),
-              mass_mean=sum(mass) / len(mass), mass_min=min(mass), seconds_per_row=round(seconds, 4),
+              mass_mean=sum(mass) / len(mass), mass_min=min(mass), tail_fault_rows=len(mass_fault),
+              mass_mean_tail_fault=sum(mass_fault) / len(mass_fault) if mass_fault else None, seconds_per_row=round(seconds, 4),
               eval=evaluate(model, rows, values, score, 1))
 print(json.dumps(report, indent=1), flush=True)
 with open(os.path.join(a.out, f"check_scorer_{a.scorer}.json"), "w") as f:
