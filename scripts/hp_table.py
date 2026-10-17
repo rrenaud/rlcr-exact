@@ -1,5 +1,7 @@
-"""One line per finished hotpot-rlvr run: config, final dev/test greedy metrics, conditional means, answer KL,
-and the generation check (gen_eval/gen_eval.json) when present. Sorted by dev greedy Brier.
+"""One line per finished hotpot-rlvr run: config, dev greedy Brier / AUROC averaged over the last 3 evals (single
+evals bounce 0.02-0.05), final dev conditional means and answer KL, test, and the generation check
+(gen_eval/gen_eval.json): answer EM ignoring format (em) and stop-after-</confidence> rate (stop), as changes
+from the base policy. Sorted by the dev average.
 usage: hp_table.py [EXPERIMENT_DIR]"""
 import glob, json, os, sys
 
@@ -15,6 +17,9 @@ for path in glob.glob(f"{root}/run-*/train_*.jsonl"):
     if not dev or not test:
         continue
     d, t = dev[-1], test[-1]
+    last = dev[-3:]
+    brier3 = sum(e["greedy_brier"] for e in last) / len(last)
+    auroc3 = sum(e["greedy_auroc"] for e in last) / len(last)
     run = path.split("/")[-2]
     g = os.path.join(root, run, "gen_eval", "gen_eval.json")
     gen = json.load(open(g)) if os.path.exists(g) else None
@@ -22,11 +27,11 @@ for path in glob.glob(f"{root}/run-*/train_*.jsonl"):
            + (f" k={a['samples_per_row']}" if a.get("samples_per_row", 1) > 1 else "")
            + (f" s{a['seed']}" if a.get("seed") else "")
            + (f" wsd={a.get('warmup_steps', 0)}/{a.get('decay_frac', 0):g}" if a.get("warmup_steps") or a.get("decay_frac") else ""))
-    line = (f"{cfg:52s} dev {d['greedy_brier']:.3f}/{d['greedy_auroc']:.3f} c|y {d.get('greedy_mean_correct', float('nan')):.2f}/"
+    line = (f"{cfg:52s} dev3 {brier3:.3f}/{auroc3:.3f} last {d['greedy_brier']:.3f} c|y {d.get('greedy_mean_correct', float('nan')):.2f}/"
             f"{d.get('greedy_mean_wrong', float('nan')):.2f} kl {d.get('answer_kl', float('nan')):.2f}  test {t['greedy_brier']:.3f}/{t['greedy_auroc']:.3f}")
     if gen:
-        line += "  gen " + " ".join(f"{s}:acc{r['accuracy_delta']:+.3f} fmt{r['format_delta']:+.3f} chg{r['answer_changed']:.2f} B{r['lora']['brier']:.3f} A{r['lora']['auroc']:.3f}"
-                                    for s, r in gen.items())
-    out.append((d["greedy_brier"], line + f"  [{run[4:19]}]"))
+        line += "  gen " + " ".join(f"{s}:em{r['em_any_delta']:+.3f} stop{r['stop_delta']:+.3f} B{r['lora']['brier']:.3f} A{r['lora']['auroc']:.3f}"
+                                    if "em_any_delta" in r else f"{s}:(old json)" for s, r in gen.items())
+    out.append((brier3, line + f"  [{run[4:19]}]"))
 for _, line in sorted(out):
     print(line)

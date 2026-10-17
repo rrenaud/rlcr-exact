@@ -17,3 +17,13 @@ def test_f1():
     assert f1_correct("x <answer>Herbert Ross</answer>", "Herbert David Ross") == 1.0
     assert f1_correct("<answer>Lyon</answer>", "Paris") == 0.0
     assert f1_correct("no tags", "Paris") == 0.0
+
+
+def test_tail_only_failure_and_em():
+    from rlcr_exact.grading import em_correct, tail_only_failure
+    good = "<think> x </think> <answer> The Beatles </answer> <analysis> y </analysis> <confidence> 0.7 </confidence>"
+    assert tail_only_failure(good + "assistant") and tail_only_failure(good)
+    assert not tail_only_failure(good.replace("<analysis>", ""))  # a missing tag is not a tail fault
+    assert not tail_only_failure(good.replace("0.7", "1.3") + "junk")  # out of range
+    assert not tail_only_failure("no tags at all")
+    assert em_correct(good + "assistant", "beatles") == 1.0 and em_correct(good, "Rolling Stones") == 0.0

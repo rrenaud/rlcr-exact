@@ -60,6 +60,28 @@ def hotpot_candidates(tokenizer) -> Candidates:
     return Candidates(strings, torch.tensor(vals), build_trie(seqs))
 
 
+def hotpot_stop_candidates(tokenizer) -> Candidates:
+    """Hotpot confidence strings scored through `confidence` `>` and an end token, so the stop after
+    </confidence> is part of the candidate. RLVR-hotpot writes a junk token there (mostly `assistant`) instead of
+    <|endoftext|> in ~22-28% of rollouts, which RLCR's format check fails (reward 0): those, like any unlisted
+    completion, earn 0. Values: 1, 1.0, 1.00, 0.d, 0.d5, 0.d0 and 0.9d (41). RLCR pays any number in [0, 1]; RLVR
+    writes 29 distinct strings, all in this set, incl. " 1 ", "1.00" and "0.98", which hotpot_candidates misses
+    (all 0.dd would be 113 values and ~3x the trie). Each spaced (`Ġ` ... `Ġ</`) or not, x 2 end tokens.
+    """
+    tid = tokenizer.convert_tokens_to_ids
+    texts = ["1", "1.0", "1.00"] + [f"0.{d}" for d in range(10)] + sorted(
+        {f"0.{d}5" for d in range(10)} | {f"0.{d}0" for d in range(10)} | {f"0.9{d}" for d in range(10)})
+    tail = [tid("confidence"), tid(">")]
+    strings, vals, seqs = [], [], []
+    for lead, close in ((["Ġ"], "Ġ</"), ([], "</")):
+        for text in texts:
+            for end in END_TOKENS:
+                strings.append("".join(lead).replace("Ġ", " ") + text + close.replace("Ġ", " ") + "confidence>" + end)
+                vals.append(float(text))
+                seqs.append([tid(t) for t in lead] + [tid(c) for c in text] + [tid(close)] + tail + [tid(end)])
+    return Candidates(strings, torch.tensor(vals), build_trie(seqs))
+
+
 def rlcr_reward(values: torch.Tensor, correct: torch.Tensor) -> torch.Tensor:
     """RLCR's total reward for each well-formed candidate (malformed completions earn 0)."""
     y = correct.to(values.dtype)

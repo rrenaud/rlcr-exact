@@ -43,9 +43,9 @@ from sklearn.metrics import roc_auc_score
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from rlcr_exact.confidence import exact_objective, hotpot_candidates, level_matrix, make_candidates, rlcr_reward, support_floor
+from rlcr_exact.confidence import exact_objective, hotpot_candidates, hotpot_stop_candidates, level_matrix, make_candidates, rlcr_reward, support_floor
 from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
-from rlcr_exact.grading import f1_correct
+from rlcr_exact.grading import em_correct, f1_correct, tail_only_failure
 from rlcr_exact.trie_score import packed_candidate_logps
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "rlcr-reward-conf-weighted-tt-scaling"))
@@ -60,20 +60,26 @@ LINEAR_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"
 Row = collections.namedtuple("Row", "qid prefix correct start j correct_f1")
 
 
-def load_rows(path, token_bytes, max_prefix):
+def load_rows(path, token_bytes, max_prefix, tail_ok=False):
     """Well-formed rollouts as Rows (problem id, prefix token ids, correctness, prompt length, output index);
     counts what was dropped.
 
     The prefix is the sampled token ids themselves (prompt_ids + completion_ids), cut through the <confidence>
     tag that opens the final confidence, so training scores exactly the tokens the policy produced.
+    With tail_ok, rows whose only format fault is after </confidence> (a junk token instead of end of text) are
+    kept too, labelled by exact match of their last <answer> (RLCR's own label is 0 for them, gated on format).
     """
     rows, dropped = [], collections.Counter()
     for line in open(path):
         q = json.loads(line)
         for j, (text, ids, ok, correct) in enumerate(zip(q["outputs"], q["completion_ids"], q["format_ok"], q["correct"])):
-            cut = cut_point(text, ids, "confidence", token_bytes) if ok else None
+            tail_fault = tail_ok and not ok and tail_only_failure(text)
+            cut = cut_point(text, ids, "confidence", token_bytes) if ok or tail_fault else None
             if cut is None:
                 dropped["format"] += 1; continue
+            if tail_fault:
+                correct = em_correct(text, q["answer"])
+                dropped["kept_tail_fault"] += 1
             prefix = q["prompt_ids"] + ids[:cut]
             if len(prefix) > max_prefix:
                 dropped["long"] += 1; continue
@@ -90,7 +96,8 @@ def make_scorer(name, tok):
         ids = DigitIds.from_tokenizer(tok)
         score = lambda model, prefixes, greedy=False, hidden=False: level_logps(model, prefixes, ids, greedy, hidden)
         return LEVELS, score, dict(levels=len(LEVELS))
-    cands = hotpot_candidates(tok) if name == "hotpot" else make_candidates(tok)
+    cands = (hotpot_candidates(tok) if name == "hotpot" else hotpot_stop_candidates(tok) if name == "hotpot-stop"
+             else make_candidates(tok))
 
     def score(model, prefixes, greedy=False, hidden=False):
         # One packed forward: the rows' common start (a question's prompt, shared by its rollouts) runs once.
@@ -284,7 +291,9 @@ def main():
     ap.add_argument("--model", default=None, help="default: the released checkpoint for the scorer's task")
     ap.add_argument("--train", required=True); ap.add_argument("--dev", required=True); ap.add_argument("--test")
     ap.add_argument("--objective", choices=["exact", "sampled"], required=True)
-    ap.add_argument("--scorer", choices=["digit", "trie", "hotpot"], default="digit")
+    ap.add_argument("--scorer", choices=["digit", "trie", "hotpot", "hotpot-stop"], default="digit",
+                    help="hotpot-stop: the hotpot candidates through `confidence>` + end token, and rows whose only fault is the "
+                         "tail after </confidence> are kept (needs a reference cache built with ref_topk.py --tail-ok)")
     ap.add_argument("--micro-batch", type=int, default=None,
                     help="rows per forward/backward when training (default: a whole problem group for the trie "
                          "scorers, whose rows share the prompt and are packed into one forward; 1 for digit)")
@@ -325,8 +334,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     args = ap.parse_args()
-    packed = args.scorer in ("trie", "hotpot")
-    args.model = args.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if args.scorer == "hotpot"
+    packed = args.scorer in ("trie", "hotpot", "hotpot-stop")
+    args.model = args.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if args.scorer.startswith("hotpot")
                                 else "mehuldamani/big-math-digits-v2-brier-base-tabc")
     random.seed(args.seed); torch.manual_seed(args.seed)
     run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_W{args.answer_kl:g}_s{args.seed}"
@@ -352,10 +361,11 @@ def main():
     tok = AutoTokenizer.from_pretrained(args.model)
     values, score, scorer_info = make_scorer(args.scorer, tok)
     token_bytes = make_token_bytes(tok)
-    train, dropped = load_rows(args.train, token_bytes, args.max_prefix)
-    dev, dev_dropped = load_rows(args.dev, token_bytes, args.max_prefix)
+    tail_ok = args.scorer == "hotpot-stop"
+    train, dropped = load_rows(args.train, token_bytes, args.max_prefix, tail_ok)
+    dev, dev_dropped = load_rows(args.dev, token_bytes, args.max_prefix, tail_ok)
     dev = dev[: args.dev_limit]
-    test = load_rows(args.test, token_bytes, args.max_prefix)[0] if args.test else None
+    test = load_rows(args.test, token_bytes, args.max_prefix, tail_ok)[0] if args.test else None
     groups = collections.defaultdict(list)
     for row in train:
         groups[row[0]].append(row)

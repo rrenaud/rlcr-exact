@@ -38,3 +38,26 @@ def last_answer(text):
 def f1_correct(text, gold, threshold=0.5):
     """1.0 if the last <answer> has token F1 >= threshold against the gold answer."""
     return float(token_f1(last_answer(text), gold) >= threshold)
+
+
+def em_correct(text, gold):
+    """1.0 if the last <answer> matches the gold answer exactly after RLCR's normalize_answer (format not checked)."""
+    return float(normalize_answer(last_answer(text)) == normalize_answer(gold))
+
+
+TABC = r".*?</think>\s*<answer>.*?</answer>\s*<analysis>.*?</analysis>\s*<confidence>(.*?)</confidence>\s*\Z"
+
+
+def tail_only_failure(text):
+    """True if the completion is well-formed under RLCR's tabc check up to and including the last </confidence>,
+    so its only fault is what follows (RLVR-hotpot often writes a junk token there instead of end of text)."""
+    end = text.rfind("</confidence>")
+    if end < 0:
+        return False
+    m = re.match(TABC, text[: end + len("</confidence>")], re.DOTALL | re.MULTILINE)
+    if not m:
+        return False
+    try:
+        return 0 <= float(m.group(1)) <= 1
+    except ValueError:
+        return False

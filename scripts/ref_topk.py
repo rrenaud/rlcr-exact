@@ -55,13 +55,14 @@ def main():
     ap.add_argument("rollouts"); ap.add_argument("out_dir")
     ap.add_argument("--model", default="mehuldamani/big-math-digits-v2-brier-base-tabc")
     ap.add_argument("--k", type=int, default=64)
+    ap.add_argument("--tail-ok", action="store_true", help="also rows whose only fault is after </confidence> (scorer hotpot-stop)")
     ap.add_argument("--max-prefix", type=int, default=4608)
     a = ap.parse_args()
     tok = AutoTokenizer.from_pretrained(a.model)
-    rows, dropped = load_rows(a.rollouts, make_token_bytes(tok), a.max_prefix)
+    rows, dropped = load_rows(a.rollouts, make_token_bytes(tok), a.max_prefix, a.tail_ok)
     model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.bfloat16, attn_implementation="sdpa",
                                                  device_map={"": 0}).eval()
-    meta = write_cache(model, rows, a.out_dir, a.k, dict(rollouts=os.path.abspath(a.rollouts), max_prefix=a.max_prefix,
+    meta = write_cache(model, rows, a.out_dir, a.k, dict(rollouts=os.path.abspath(a.rollouts), max_prefix=a.max_prefix, tail_ok=a.tail_ok,
                                                           model=a.model, dropped=dropped))
     print(json.dumps(dict(event="done", rows=meta["rows"], positions=meta["positions"], out=a.out_dir)), flush=True)
 
