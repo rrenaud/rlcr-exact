@@ -10,6 +10,62 @@ This directory is a git repo (`main`). The subdirectories `rlcr-reward-conf-weig
 own repos; they are git-ignored here and not covered. `data/` is ignored too: rebuild it with
 `scripts/build_math_fresh.py` and `scripts/math_unseen.py` (it derives from the gated Big-Math dataset).
 
+## What we have learned (as of 2026-10-17)
+
+Short version of the sections below; each point names its evidence.
+
+**Where the exact objective can help**
+- **Math is a dead end for frozen training.** The math model writes its number in `<analysis>` and the tag copies
+  it (p 0.9997), so q is one-hot at the tag and both gradients vanish. The no-penalty run drifted ~30 nats per
+  answer with no calibration change. (Finding and Decision sections, 2026-10-15/16.)
+- **HotpotQA keeps the confidence uncertain** at the tag (entropy ~0.66 nats), the regime where exact scoring
+  helped in rewarding_doubt.
+- **The released RLCR-hotpot checkpoint has nothing left to gain** from continued frozen training on its own
+  reward and data: no config beat untrained by more than the noise (dev Brier SE ~0.007). Exact was ahead of
+  sampled at every lr, within noise. (RLCR-start sweep.)
+- **So the test bed is RLVR-hotpot** (same data, correctness-only reward, confidence ~0.95-1.0 everywhere, AUROC
+  0.55). The gap to RLCR is calibration alone.
+
+**Collapse and the support floor**
+- Exact gradients on a candidate scale with its q. RLVR's q is peaked (median row has < 1% on values <= 0.7), so
+  "one constant confidence" is nearly absorbing. rewarding_doubt saw the same in frozen runs at lr >= 1.6e-4.
+- ReFIne's (arXiv 2510.09062) histogram remap of its SFT labels toward 0.9 empirical + 0.1 uniform reduces to:
+  keep mass on every level. Our version is `--support-floor beta`: beta * CE(uniform over the 11 levels, the
+  row's level marginal). Its gradient (~q_l - 1/L) does not saturate; reward cost is at most ~beta.
+- beta = 0.03 raises the smallest level mass from ~0 to 0.003-0.005 and expected-confidence AUROC 0.58 -> 0.63 even
+  at W=1. Late in a working run it points against the objective (cosine about -0.8 at step 500), so it acts as
+  a brake. Whether it is needed at low W is being tested (floor 0.01 and 0 in the current round).
+
+**The answer-KL penalty**
+- **W=0 is out:** without the penalty the answers drift by 30-35 nats per completion within 100 steps (math run
+  `run-20261015T232731Z-fd144d67c7`). Not re-run on HotpotQA.
+- **W=1 stalls RLVR training.** The cached reference comes from an unpacked per-row forward; training scores
+  packed. In bf16 that mismatch is ~0.1 nats per row at step 0, and its gradient is noise (cosine across batches
+  ~0.02) that is 9-21x larger than the calibration gradient. Adam then moves at its noise floor (step fraction
+  ~0.14-0.2). Subtracting the step-0 KL does not change the gradient; fixes are a packed reference cache or a
+  dead zone relu(KL - KL0 - margin). (grad_check.py; Gradient diagnostics.)
+- **Lowering W fixes it:** W = 0.1 / 0.03 / 0.01 gives dev greedy Brier 0.192 / 0.178 / 0.175 (from 0.414),
+  AUROC ~0.80, and confidences that separate right from wrong (0.73 vs 0.36 at W=0.01). Dev answer KL ends
+  0.23-0.38 nats, not monotone in W. Test is harder (accuracy 0.45 vs dev 0.55), so test confidence runs high.
+- Overfit checks (a fixed batch) moved even at W=1: a fixed batch makes the KL gradient consistent. The stall
+  on full data was gradient noise, not a broken pipeline.
+
+**Optimization**
+- After ~250 steps at 3e-4 the Adam step fraction falls under the noise floor (~0.09 at step 500): a decaying
+  schedule (WSD) or a lower late lr may help.
+- lr 1e-3 drifted answers 3.3-3.5 nats even at W=1 from the RLCR start.
+
+**Measurement caveats**
+- bf16: packed vs per-row scoring agree on greedy picks 87.5% of the time and give gradients with cosine 0.97;
+  the scorer matches vLLM greedy on ~95% of rows (the rest are exact ties). Compare aggregates, not traces.
+- Trained adapters must be checked with generation, not only frozen-prefix scoring: the LoRA is on during every
+  generated token. `gen_eval.sh` (end of every hotpot run) measures the accuracy change and the answers that changed,
+  against a base regeneration as the noise floor.
+
+**Process**
+- Hyperparameter rounds jitter each center by exp(N(0, 0.35)) on lr and the loss/schedule knobs (`JITTER=0.35
+  sweep_chain.sh`, `scripts/jitter.py`), so repeated centers explore. Select on dev, report test.
+
 ## Decisions so far
 
 ### 1. Continue training the released checkpoints, not reproduce RLCR from scratch
@@ -425,31 +481,7 @@ RLCR-hotpot was trained from Qwen2.5-7B base (`configs/Qwen-7B/hotpot/RLCR.yaml`
   `adam_fraction` (median |m_hat|/sqrt(v_hat) from Adam's state) is logged every 10 steps at no cost.
 - Queued: exact 3e-4, beta 0.03, W in {0.1, 0.03, 0.01}, with --grad-decomp-every 25.
 
-## Next steps
-
-1. ~~Analyze the cache~~ (done: see "Fresh train rollouts" above).
-2. GPU smoke test of `train_frozen.py` (a few steps, small dev subset), with **both scorers on the untrained
-   checkpoint**. Check that trie and digit give the same level probabilities and eval metrics, and that both
-   match the vLLM greedy confidences (mass near 1, greedy rarely off the list). Measure step time and memory
-   for each. If they agree, make `--scorer digit` the default.
-3. Stage A runs: exact vs sampled, same data and steps, 3 seeds each, short LR sweep (LoRA, around 1e-5 to
-   1e-4; the paper's full fine-tuning used 5e-6). Report dev and official-test greedy metrics.
-4. If step time is too slow (about 1 s per row with gradients through the prefix), consider LoRA on late
-   layers only, or a stop-gradient prefix KV (biased; measure the difference first).
-5. Out-of-domain evaluation of trained adapters: cache greedy prefixes from the frozen model on RLCR's
-   other eval sets and score with the trained LoRA. These are the sets where the released model's
-   calibration is worst.
-6. Stage B (online): full GRPO continuation where the reasoning also updates. vLLM samples with the
-   current LoRA adapter and sleeps during the HF training step (weights to host RAM), and exact scoring
-   replaces the sampled confidence reward for the confidence tokens. Feed the expected Brier reward into
-   the group advantage for the prefix (Rao-Blackwellized). About 9 min per 512-rollout step at 7B on the 4090,
-   or use Beast (48 GB).
-7. HotpotQA: rebuild the Modified construction for fresh questions (check how removed gold paragraphs
-   were replaced), then repeat stages A and B with `hotpot-v2-brier-7b-no-split`.
-8. Open checks: confirm the math seen/unseen split against their wandb generations. Decide whether the
-   expected confidence (not only greedy) is worth reporting as a cheap readout.
-
-### Lowering the answer-KL weight (RLVR start, exact 3e-4, floor 0.03, 500 steps, seed 0)
+## Lowering the answer-KL weight (RLVR start, exact 3e-4, floor 0.03, 500 steps, seed 0; 2026-10-16)
 
 The step-0 KL against the unpacked reference is about 0.1 nats of bf16/packing mismatch, and its gradient is noise
 (batch-to-batch cosine about 0.02). At W=1 it swamps the calibration gradient and training stalls. Lowering W lets
@@ -465,3 +497,20 @@ the objective through:
 
 Dev accuracy 0.548, test 0.452, so test confidence runs high. The answer KL is not monotone in W.
 Sampled at W=0.01 is the matched comparison.
+
+## Next steps (2026-10-17)
+
+In the queue (gpuq, `rlcr-hotpot-rlvr-*`):
+1. Sampled, 3e-4, W=0.01, floor 0.03 (`run-20261017T003639Z-9143c6c52d`): the matched exact-vs-sampled comparison.
+   Submitted before gen_eval was added to run_frozen.sh; run `gen_eval_batch.sh` on it afterwards.
+2. Generation check (`rlcr-hotpot-rlvr-geneval/run-20261017T011050Z-2641c372bc`): the W=0.01/0.03/0.1 adapters
+   plus a no-adapter base regeneration (noise floor for "answer changed").
+3. Jittered round (s=0.35) around exact 3e-4 W=0.01 floor 0.03: W center 0.003; floor 0.01 and 0; lr 1e-3 and
+   1e-4; WSD (warmup 25, decay 0.3). Each run ends with gen_eval.
+
+Then:
+- Seeds 1-2 for the best exact config and for sampled at the same config: the headline needs seed spread.
+- A packed-layout reference cache (or a dead zone on the KL), so the penalty measures drift and not bf16 noise.
+- Out-of-domain evals of the best adapter; Stage B (online GRPO with exact confidence reward) if Stage A holds up.
+
+Older plan items (math, digit-scorer default, HotpotQA rebuild) are done or dropped; see the sections above.
