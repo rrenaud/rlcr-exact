@@ -186,3 +186,12 @@ def test_sampled_k_draws_converge_to_exact_gradient():
 
     err = lambda k: (sampled_grad(k) - g_exact).norm() / g_exact.norm()
     assert err(20000) < 0.05 and err(1) > err(20000)
+
+
+def test_floor_weight_anneals_linearly():
+    from types import SimpleNamespace
+    a = SimpleNamespace(support_floor=0.05, floor_decay_from=None, steps=500)
+    assert train_frozen.floor_weight(a, 400) == 0.05
+    a.floor_decay_from = 0.6
+    w = [train_frozen.floor_weight(a, s) for s in (1, 300, 400, 500)]
+    assert w[0] == w[1] == 0.05 and abs(w[2] - 0.025) < 1e-12 and w[3] == 0

@@ -109,6 +109,14 @@ def ece(c, y, bins=10, centred=False):
     return float(sum((b == k).mean() * abs(y[b == k].mean() - c[b == k].mean()) for k in np.unique(b)))
 
 
+def floor_weight(args, step):
+    """Support-floor beta at this step: constant, or linear to 0 from --floor-decay-from (a fraction of the steps)."""
+    if args.floor_decay_from is None:
+        return args.support_floor
+    start = args.floor_decay_from * args.steps
+    return args.support_floor * min(1.0, max(0.0, (args.steps - step) / max(args.steps - start, 1)))
+
+
 def sample_draws(qs, correct, values, k):
     """k draws per row from its candidate distribution plus "other" (index K, reward 0): [[(j, reward)] * k] per row."""
     out = []
@@ -295,6 +303,8 @@ def main():
     ap.add_argument("--answer-kl", type=float, default=1.0, help="W: weight of the answer-KL penalty (0 = off)")
     ap.add_argument("--samples-per-row", type=int, default=1,
                     help="sampled: confidence draws per cached prefix per step (k); one scoring pass serves all k")
+    ap.add_argument("--floor-decay-from", type=float, default=None,
+                    help="anneal the support floor linearly to 0 from this fraction of the steps to the end (default: constant)")
     ap.add_argument("--support-floor", type=float, default=0.0,
                     help="beta: weight of the cross-entropy from a uniform target over the levels 0.0..1.0 to each "
                          "row's level marginal (0 = off); keeps probability on every level so training cannot collapse")
@@ -318,6 +328,8 @@ def main():
     run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_W{args.answer_kl:g}_s{args.seed}"
     if args.support_floor:
         run_name += f"_F{args.support_floor:g}"
+        if args.floor_decay_from is not None:
+            run_name += f"-anneal{args.floor_decay_from:g}"
     if args.samples_per_row > 1:
         run_name += f"_k{args.samples_per_row}"
     if args.warmup_steps or args.decay_frac:
@@ -414,7 +426,7 @@ def main():
                 terms = [("objective", loss)]
                 if args.support_floor:
                     floor = support_floor(logps, levels_gpu)
-                    terms.append(("floor", args.support_floor * floor.sum()))
+                    terms.append(("floor", floor_weight(args, step) * floor.sum()))
                     stats["support_floor"] += floor.sum().item() / n_rows
                 if args.answer_kl:
                     kl = answer_kl(model, states, part, ref_topk)
@@ -434,7 +446,7 @@ def main():
             previous_parts = parts
         opt.step(); sched.step(); opt.zero_grad(set_to_none=True)
         if step % 10 == 0:
-            log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, lr=opt.param_groups[0]["lr"],
+            log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, lr=opt.param_groups[0]["lr"], floor_beta=floor_weight(args, step),
                 adam_fraction=adam_fraction(opt), **{k: round(v, 4) for k, v in stats.items()})
         if step % args.eval_every == 0 or step == args.steps:
             log(event="eval", step=step, split="dev", **evaluate_dev())
