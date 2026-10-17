@@ -89,3 +89,17 @@ def test_packed_gradients_match_per_row():
         return {n: p.grad.clone() for n, p in model.named_parameters() if p.requires_grad}
     a, b = grads(True), grads(False)
     assert all(torch.allclose(a[n], b[n], atol=1e-5) for n in a)
+
+
+def test_tries_last_and_no_trie_layouts_match():
+    from rlcr_exact.trie_score import packed_candidate_logps
+    prefixes = [PREFIX + [40, 41], PREFIX + [42], PREFIX + [43, 44, 45]]
+    trie = build_trie(CANDS)
+    model = tiny_model(seed=3)
+    with torch.no_grad():
+        a, pa, sa = packed_candidate_logps(model, prefixes, trie, greedy=True, hidden=True)
+        b, pb, sb = packed_candidate_logps(model, prefixes, trie, greedy=True, hidden=True, tries_last=True)
+        sc = packed_candidate_logps(model, prefixes, None, hidden=True)
+    assert torch.allclose(a, b, atol=1e-5) and pa == pb
+    for x, y, z in zip(sa, sb, sc):
+        assert torch.allclose(x, y, atol=1e-5) and torch.allclose(x, z, atol=1e-5)

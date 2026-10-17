@@ -100,7 +100,8 @@ def _ancestor_matrix(trie: Trie) -> torch.Tensor:
     return trie._anc
 
 
-def packed_candidate_logps(model, prefixes: list[list[int]], trie: Trie, greedy: bool = False, hidden: bool = False):
+def packed_candidate_logps(model, prefixes: list[list[int]], trie: Trie | None, greedy: bool = False, hidden: bool = False,
+                           tries_last: bool = False):
     """candidate_logps for several prefixes at once, running their common start a single time.
 
     Layout of the one sequence: [shared][suffix_1][trie_1][suffix_2][trie_2]...  where shared is the longest
@@ -109,6 +110,10 @@ def packed_candidate_logps(model, prefixes: list[list[int]], trie: Trie, greedy:
     row's own, so every row's logits equal its candidate_logps. Gradients reach the shared part once, summed
     over rows. Returns [rows, num_candidates] logps, then the greedy picks (list) with greedy=True, then
     per-row hidden states [len(prefix_b), d] with hidden=True.
+
+    tries_last=True lays out [shared][suffix_1]..[suffix_B][trie_1]..[trie_B] instead, so the suffixes sit at the
+    same offsets whatever the trie size (same values in exact arithmetic; in bf16 the kernels' blocking can
+    differ). trie=None packs no candidates and returns only the hidden states (a reference forward).
     """
     model = model.get_base_model() if hasattr(model, "get_base_model") else model  # unwrap PEFT
     device = next(model.parameters()).device
@@ -117,32 +122,43 @@ def packed_candidate_logps(model, prefixes: list[list[int]], trie: Trie, greedy:
     limit = min(len(p) for p in prefixes) - 1  # every row keeps at least one token of its own
     while shared < limit and all(p[shared] == prefixes[0][shared] for p in prefixes):
         shared += 1
-    n = len(trie.tokens)
-    anc = _ancestor_matrix(trie)
-    tokens, positions, spans = list(prefixes[0][:shared]), list(range(shared)), []
+    n = len(trie.tokens) if trie is not None else 0
+    anc = _ancestor_matrix(trie) if n else None
+    tokens, positions, spans = list(prefixes[0][:shared]), list(range(shared)), []  # spans: (suffix start, suffix end, trie start)
+
+    def add_trie(p):
+        start = len(tokens)
+        tokens.extend(trie.tokens); positions.extend(len(p) + d for d in trie.depths)
+        return start
     for p in prefixes:
         s0 = len(tokens)
         tokens += p[shared:]; positions += range(shared, len(p))
-        t0 = len(tokens)
-        tokens += trie.tokens; positions += [len(p) + d for d in trie.depths]
-        spans.append((s0, t0, len(p)))
+        spans.append([s0, len(tokens), None])
+        if n and not tries_last:
+            spans[-1][2] = add_trie(p)
+    if n and tries_last:
+        for span, p in zip(spans, prefixes):
+            span[2] = add_trie(p)
     total = len(tokens)
     allowed = torch.zeros(total, total, dtype=torch.bool)
     allowed[:shared, :shared] = torch.tril(torch.ones(shared, shared, dtype=torch.bool))
-    for s0, t0, _ in spans:
-        ls = t0 - s0
-        allowed[s0:t0, :shared] = True
-        allowed[s0:t0, s0:t0] = torch.tril(torch.ones(ls, ls, dtype=torch.bool))
-        allowed[t0:t0 + n, :shared] = True
-        allowed[t0:t0 + n, s0:t0] = True
-        allowed[t0:t0 + n, t0:t0 + n] = anc
+    for s0, e0, t0 in spans:
+        ls = e0 - s0
+        allowed[s0:e0, :shared] = True
+        allowed[s0:e0, s0:e0] = torch.tril(torch.ones(ls, ls, dtype=torch.bool))
+        if n:
+            allowed[t0:t0 + n, :shared] = True
+            allowed[t0:t0 + n, s0:e0] = True
+            allowed[t0:t0 + n, t0:t0 + n] = anc
     mask = torch.zeros(total, total, dtype=dtype)
     mask.masked_fill_(~allowed, torch.finfo(dtype).min)
     states = model.model(input_ids=torch.tensor([tokens], device=device), attention_mask=mask[None, None].to(device),
                          position_ids=torch.tensor([positions], device=device), use_cache=False).last_hidden_state[0]
+    if not n:
+        return [torch.cat([states[:shared], states[s0:e0]]) for s0, e0, _ in spans]
     # Logits where a trie token is predicted: each row's last prefix position and each of its parent nodes.
     parent_rows = sorted({p for p in trie.parents if p >= 0})
-    reads = [[t0 - 1] + [t0 + p for p in parent_rows] for s0, t0, _ in spans]
+    reads = [[e0 - 1] + [t0 + p for p in parent_rows] for s0, e0, t0 in spans]
     logp = model.lm_head(states[torch.tensor(sum(reads, []), device=device)]).float().log_softmax(-1)
     logp = logp.view(len(prefixes), 1 + len(parent_rows), -1)
     slot = {-1: 0} | {p: k + 1 for k, p in enumerate(parent_rows)}
@@ -166,5 +182,5 @@ def packed_candidate_logps(model, prefixes: list[list[int]], trie: Trie, greedy:
                     picks.append(None); break
         out.append(picks)
     if hidden:
-        out.append([torch.cat([states[:shared], states[s0:t0]]) for s0, t0, _ in spans])
+        out.append([torch.cat([states[:shared], states[s0:e0]]) for s0, e0, _ in spans])
     return out[0] if len(out) == 1 else tuple(out)
