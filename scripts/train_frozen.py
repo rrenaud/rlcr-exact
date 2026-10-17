@@ -11,8 +11,9 @@ confidence completion is trained, over one of two candidate sets scored exactly:
                   (confidence.hotpot_candidates)
 
   exact:   maximize sum_j q_j R_j (the unlisted mass earns 0, as a malformed completion does in RLCR)
-  sampled: GRPO on the confidence tokens alone: sample one completion per row from q (or "other"),
-           advantage = reward minus its problem group's mean (no std division, as in RLCR), loss -A log q
+  sampled: GRPO on the confidence tokens alone: sample --samples-per-row k completions per row from q (or "other"),
+           advantage = reward minus the mean over the problem group's rows x k draws (no std division, as in
+           RLCR), loss -(1/k) sum A log q per row. Exact is its k -> infinity limit (a baseline changes only variance).
 
 Defaults follow the rrenaud/rewarding_doubt sweeps (docs/sweeps): Adam at a constant 3e-4 with one update per
 32 rows, LoRA rank 4 (alpha = rank) on the late half of the layers, one epoch.
@@ -106,6 +107,26 @@ def ece(c, y, bins=10, centred=False):
     level (nearest 0.1), for confidences that sit on or next to the levels."""
     b = np.rint(c * bins).astype(int) if centred else np.minimum((c * bins).astype(int), bins - 1)
     return float(sum((b == k).mean() * abs(y[b == k].mean() - c[b == k].mean()) for k in np.unique(b)))
+
+
+def sample_draws(qs, correct, values, k):
+    """k draws per row from its candidate distribution plus "other" (index K, reward 0): [[(j, reward)] * k] per row."""
+    out = []
+    for q, y in zip(qs, correct):
+        probs = torch.cat([q, (1 - q.sum()).clamp_min(0)[None]])
+        js = torch.multinomial(probs / probs.sum(), k, replacement=True).tolist()
+        out.append([(j, 0.0 if j == len(q) else rlcr_reward(values[j], torch.tensor(y, device=values.device)).item()) for j in js])
+    return out
+
+
+def sampled_loss(logps, draws, baseline):
+    """GRPO loss on the confidence: -(1/k) sum_draws (reward - baseline) log q_j per row, summed over rows."""
+    loss = 0
+    for row, row_draws in zip(logps, draws):
+        for j, reward in row_draws:
+            logq = torch.log1p(-row.exp().sum().clamp(max=1 - 1e-6)) if j == len(row) else row[j]
+            loss = loss - (reward - baseline) * logq / len(row_draws)
+    return loss
 
 
 def stop_backward_at_first_adapter(model):
@@ -272,6 +293,8 @@ def main():
     ap.add_argument("--dev-limit", type=int, default=None)
     ap.add_argument("--drift-rows", type=int, default=200, help="dev rows for the answer-KL metric (0 = off)")
     ap.add_argument("--answer-kl", type=float, default=1.0, help="W: weight of the answer-KL penalty (0 = off)")
+    ap.add_argument("--samples-per-row", type=int, default=1,
+                    help="sampled: confidence draws per cached prefix per step (k); one scoring pass serves all k")
     ap.add_argument("--support-floor", type=float, default=0.0,
                     help="beta: weight of the cross-entropy from a uniform target over the levels 0.0..1.0 to each "
                          "row's level marginal (0 = off); keeps probability on every level so training cannot collapse")
@@ -295,6 +318,8 @@ def main():
     run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_W{args.answer_kl:g}_s{args.seed}"
     if args.support_floor:
         run_name += f"_F{args.support_floor:g}"
+    if args.samples_per_row > 1:
+        run_name += f"_k{args.samples_per_row}"
     if args.warmup_steps or args.decay_frac:
         run_name += f"_wsd{args.warmup_steps}-{args.decay_frac:g}"
     if args.train_problems:
@@ -371,12 +396,8 @@ def main():
                 with torch.no_grad():
                     qs = torch.cat([score(model, [r[1] for r in part]).exp().float()
                                     for part in chunks(group, len(group) if packed else args.eval_batch)])
-                for q, row in zip(qs, group):
-                    probs = torch.cat([q, (1 - q.sum()).clamp_min(0)[None]])
-                    j = torch.multinomial(probs / probs.sum(), 1).item()
-                    reward = 0.0 if j == len(q) else rlcr_reward(values_gpu[j], torch.tensor(row.correct, device=values_gpu.device)).item()
-                    draws.append((j, reward))
-                baseline = np.mean([r for _, r in draws])
+                draws = sample_draws(qs, [row.correct for row in group], values_gpu, args.samples_per_row)
+                baseline = np.mean([r for row_draws in draws for _, r in row_draws])
             micro = args.micro_batch or (len(group) if packed else 1)
             for start in range(0, len(group), micro):
                 part = group[start: start + micro]
@@ -389,10 +410,7 @@ def main():
                 if args.objective == "exact":
                     loss = -expected.sum()
                 else:
-                    loss = 0
-                    for row, (j, reward) in zip(logps, draws[start: start + len(part)]):
-                        logq = torch.log1p(-row.exp().sum().clamp(max=1 - 1e-6)) if j == len(row) else row[j]
-                        loss = loss - (reward - baseline) * logq
+                    loss = sampled_loss(logps, draws[start: start + len(part)], baseline)
                 terms = [("objective", loss)]
                 if args.support_floor:
                     floor = support_floor(logps, levels_gpu)

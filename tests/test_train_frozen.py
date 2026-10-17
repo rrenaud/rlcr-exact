@@ -163,3 +163,26 @@ def test_grad_report_parts():
     r = grad_report({"objective": a, "kl": b}, {"objective": a})
     assert r["norm_objective"] == 1.0 and r["norm_kl"] == 2.0 and abs(r["norm_total"] - 5 ** 0.5) < 1e-4
     assert r["cos_kl_objective"] == 0.0 and r["cos_prev_objective"] == 1.0 and "cos_prev_kl" not in r
+
+
+def test_sampled_k_draws_converge_to_exact_gradient():
+    from rlcr_exact.confidence import exact_objective
+    torch.manual_seed(0)
+    values = torch.tensor([0.1, 0.5, 0.9, 1.0])
+    correct = [1.0, 0.0, 1.0]
+    logits = torch.randn(3, 5, requires_grad=True)  # last column = "other" (off-list) mass
+    logps = logits.log_softmax(-1)[:, :4]
+    (-exact_objective(logps, values, torch.tensor(correct)[:, None]).sum()).backward()
+    g_exact, logits.grad = logits.grad.clone(), None
+
+    def sampled_grad(k):
+        logps = logits.log_softmax(-1)[:, :4]
+        draws = train_frozen.sample_draws(logps.exp().detach(), correct, values, k)
+        assert all(len(d) == k for d in draws)
+        baseline = np.mean([r for d in draws for _, r in d])
+        train_frozen.sampled_loss(logps, draws, baseline).backward()
+        g, logits.grad = logits.grad.clone(), None
+        return g
+
+    err = lambda k: (sampled_grad(k) - g_exact).norm() / g_exact.norm()
+    assert err(20000) < 0.05 and err(1) > err(20000)
