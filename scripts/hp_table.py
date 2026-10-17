@@ -23,7 +23,7 @@ for path in glob.glob(f"{root}/run-*/train_*.jsonl"):
     line = (f"{cfg:52s} dev {d['greedy_brier']:.3f}/{d['greedy_auroc']:.3f} c|y {d.get('greedy_mean_correct', float('nan')):.2f}/"
             f"{d.get('greedy_mean_wrong', float('nan')):.2f} kl {d.get('answer_kl', float('nan')):.2f}  test {t['greedy_brier']:.3f}/{t['greedy_auroc']:.3f}")
     if gen:
-        line += "  gen " + " ".join(f"{s}:acc{r['accuracy_delta']:+.3f} chg{r['answer_changed']:.2f} B{r['lora']['brier']:.3f} A{r['lora']['auroc']:.3f}"
+        line += "  gen " + " ".join(f"{s}:acc{r['accuracy_delta']:+.3f} fmt{r['format_delta']:+.3f} chg{r['answer_changed']:.2f} B{r['lora']['brier']:.3f} A{r['lora']['auroc']:.3f}"
                                     for s, r in gen.items())
     out.append((d["greedy_brier"], line + f"  [{run[4:19]}]"))
 for _, line in sorted(out):
