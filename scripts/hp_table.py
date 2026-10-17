@@ -19,6 +19,8 @@ for path in glob.glob(f"{root}/run-*/train_*.jsonl"):
     g = os.path.join(root, run, "gen_eval", "gen_eval.json")
     gen = json.load(open(g)) if os.path.exists(g) else None
     cfg = (f"{a['objective']:7s} lr={a['lr']:<7g} W={a.get('answer_kl', 0):<6g} F={a.get('support_floor', 0):<6g}"
+           + (f" k={a['samples_per_row']}" if a.get("samples_per_row", 1) > 1 else "")
+           + (f" s{a['seed']}" if a.get("seed") else "")
            + (f" wsd={a.get('warmup_steps', 0)}/{a.get('decay_frac', 0):g}" if a.get("warmup_steps") or a.get("decay_frac") else ""))
     line = (f"{cfg:52s} dev {d['greedy_brier']:.3f}/{d['greedy_auroc']:.3f} c|y {d.get('greedy_mean_correct', float('nan')):.2f}/"
             f"{d.get('greedy_mean_wrong', float('nan')):.2f} kl {d.get('answer_kl', float('nan')):.2f}  test {t['greedy_brier']:.3f}/{t['greedy_auroc']:.3f}")

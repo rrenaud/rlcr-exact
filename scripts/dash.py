@@ -33,6 +33,7 @@ def config(args):  # the settings that tell runs apart, as short keys (table col
     for key, tag in (("support_floor", "F"), ("answer_kl", "W"), ("train_problems", "overfit")):
         c[tag] = f"{args[key]:g}" if args.get(key) else "-"
     c["wsd"] = f"{args.get('warmup_steps', 0)}/{args.get('decay_frac', 0):g}" if args.get("warmup_steps") or args.get("decay_frac") else "-"
+    c["k"] = str(args["samples_per_row"]) if args.get("samples_per_row", 1) > 1 else "-"
     c["seed"] = str(args.get("seed", 0))
     return c
 
