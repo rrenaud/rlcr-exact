@@ -12,20 +12,20 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from train_frozen import evaluate, load_rows, make_scorer, make_token_bytes
+from train_frozen import STOP_SCORERS, evaluate, load_rows, make_scorer, make_token_bytes
 
 ap = argparse.ArgumentParser()
 ap.add_argument("rollouts")
-ap.add_argument("--scorer", required=True, choices=["digit", "trie", "hotpot", "hotpot-stop"])
+ap.add_argument("--scorer", required=True, choices=["digit", "trie", "hotpot", "hotpot-stop", "rlcr11"])
 ap.add_argument("--model", default=None)
 ap.add_argument("--rows", type=int, default=500)
 ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
 a = ap.parse_args()
-a.model = a.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if a.scorer.startswith("hotpot")
+a.model = a.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if a.scorer.startswith("hotpot") or a.scorer == "rlcr11"
                       else "mehuldamani/big-math-digits-v2-brier-base-tabc")
 
 tok = AutoTokenizer.from_pretrained(a.model)
-stop = a.scorer == "hotpot-stop"  # rows ending in junk after </confidence> are kept; greedy must leave the list there
+stop = a.scorer in STOP_SCORERS  # rows ending in junk after </confidence> are kept; greedy must leave the list there
 rows = load_rows(a.rollouts, make_token_bytes(tok), 4608, tail_ok=stop)[0][: a.rows]
 stated, faulted = {}, set()
 for q in map(json.loads, open(a.rollouts)):

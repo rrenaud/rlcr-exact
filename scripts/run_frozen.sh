@@ -1,10 +1,11 @@
 #!/bin/bash
-# One Stage A run (gpuq payload): [TASK=math|hotpot|hotpot-rlvr] run_frozen.sh OBJECTIVE LR SEED [extra train_frozen.py args]
+# One Stage A run (gpuq payload): [TASK=math|hotpot|hotpot-rlvr|hotpot-rlvr-stop|hotpot-rlvr-11] run_frozen.sh OBJECTIVE LR SEED [extra train_frozen.py args]
 export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_CACHE=/scratch/hf/hub HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-if [ "${TASK:-math}" = hotpot-rlvr ] || [ "${TASK:-math}" = hotpot-rlvr-stop ]; then  # uncalibrated start: RLVR-hotpot
+case "${TASK:-math}" in hotpot-rlvr|hotpot-rlvr-stop|hotpot-rlvr-11) RLVR=1;; *) RLVR=0;; esac
+if [ $RLVR = 1 ]; then  # uncalibrated start: RLVR-hotpot
   C=/data/gpuq-runs/rrenaud/rlcr-hotpot-rlvr-cache/run-20261016T073943Z-04bf759137; T=hotpot
-  # hotpot-rlvr-stop scores the end token after </confidence> and keeps tail-fault rows (pass its --ref-topk)
-  SC=$([ "$TASK" = hotpot-rlvr-stop ] && echo hotpot-stop || echo hotpot)
+  # -stop and -11 score the end token after </confidence> and keep tail-fault rows (pass the --tail-ok --ref-topk)
+  SC=$(case "$TASK" in hotpot-rlvr-stop) echo hotpot-stop;; hotpot-rlvr-11) echo rlcr11;; *) echo hotpot;; esac)
   S="--scorer $SC --model mehuldamani/hotpot-v2-correctness-7b"; G="--model mehuldamani/hotpot-v2-correctness-7b"
 elif [ "${TASK:-math}" = hotpot ]; then
   C=/data/gpuq-runs/rrenaud/rlcr-hotpot-cache/run-20261016T003439Z-bc13159a85; T=hotpot; S="--scorer hotpot"

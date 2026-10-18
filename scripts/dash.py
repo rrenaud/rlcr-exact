@@ -29,7 +29,7 @@ def load(path, mtime):  # mtime keys the cache, so a growing log is re-read
 
 
 def config(args):  # the settings that tell runs apart, as short keys (table columns and plot names)
-    c = dict(obj=args.get("objective", "?"), lr=f"{args.get('lr', 0):g}")
+    c = dict(obj=args.get("objective", "?"), scorer=args.get("scorer", "?"), lr=f"{args.get('lr', 0):g}")
     for key, tag in (("support_floor", "F"), ("answer_kl", "W"), ("train_problems", "overfit")):
         c[tag] = f"{args[key]:g}" if args.get(key) else "-"
     c["wsd"] = f"{args.get('warmup_steps', 0)}/{args.get('decay_frac', 0):g}" if args.get("warmup_steps") or args.get("decay_frac") else "-"

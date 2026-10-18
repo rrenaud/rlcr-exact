@@ -43,7 +43,7 @@ from sklearn.metrics import roc_auc_score
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from rlcr_exact.confidence import exact_objective, hotpot_candidates, hotpot_stop_candidates, level_matrix, make_candidates, rlcr_reward, support_floor
+from rlcr_exact.confidence import exact_objective, hotpot_candidates, hotpot_stop_candidates, level_matrix, make_candidates, rlcr11_candidates, rlcr_reward, support_floor
 from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
 from rlcr_exact.grading import em_correct, f1_correct, tail_only_failure
 from rlcr_exact.trie_score import packed_candidate_logps
@@ -57,6 +57,7 @@ LINEAR_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"
 
 # A training row: one cached rollout, cut after "<confidence>". j is the output's index within its question.
 # correct is RLCR's label (exact match for HotpotQA), which training uses; correct_f1 (F1 >= 0.5) is reported.
+STOP_SCORERS = ("hotpot-stop", "rlcr11")  # score through the end token, so tail-fault rows are kept (earn 0 off-list)
 Row = collections.namedtuple("Row", "qid prefix correct start j correct_f1")
 
 
@@ -97,7 +98,7 @@ def make_scorer(name, tok):
         score = lambda model, prefixes, greedy=False, hidden=False: level_logps(model, prefixes, ids, greedy, hidden)
         return LEVELS, score, dict(levels=len(LEVELS))
     cands = (hotpot_candidates(tok) if name == "hotpot" else hotpot_stop_candidates(tok) if name == "hotpot-stop"
-             else make_candidates(tok))
+             else rlcr11_candidates(tok) if name == "rlcr11" else make_candidates(tok))
 
     def score(model, prefixes, greedy=False, hidden=False):
         # One packed forward: the rows' common start (a question's prompt, shared by its rollouts) runs once.
@@ -291,9 +292,10 @@ def main():
     ap.add_argument("--model", default=None, help="default: the released checkpoint for the scorer's task")
     ap.add_argument("--train", required=True); ap.add_argument("--dev", required=True); ap.add_argument("--test")
     ap.add_argument("--objective", choices=["exact", "sampled"], required=True)
-    ap.add_argument("--scorer", choices=["digit", "trie", "hotpot", "hotpot-stop"], default="digit",
+    ap.add_argument("--scorer", choices=["digit", "trie", "hotpot", "hotpot-stop", "rlcr11"], default="digit",
                     help="hotpot-stop: the hotpot candidates through `confidence>` + end token, and rows whose only fault is the "
-                         "tail after </confidence> are kept (needs a reference cache built with ref_topk.py --tail-ok)")
+                         "tail after </confidence> are kept (needs a reference cache built with ref_topk.py --tail-ok); rlcr11: only "
+                         "0.0 .. 1.0 in the spaced spelling, each through the end token, same rows as hotpot-stop")
     ap.add_argument("--micro-batch", type=int, default=None,
                     help="rows per forward/backward when training (default: a whole problem group for the trie "
                          "scorers, whose rows share the prompt and are packed into one forward; 1 for digit)")
@@ -334,8 +336,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     args = ap.parse_args()
-    packed = args.scorer in ("trie", "hotpot", "hotpot-stop")
-    args.model = args.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if args.scorer.startswith("hotpot")
+    packed = args.scorer in ("trie", "hotpot", "hotpot-stop", "rlcr11")
+    args.model = args.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if args.scorer.startswith("hotpot") or args.scorer == "rlcr11"
                                 else "mehuldamani/big-math-digits-v2-brier-base-tabc")
     random.seed(args.seed); torch.manual_seed(args.seed)
     run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_W{args.answer_kl:g}_s{args.seed}"
@@ -361,7 +363,7 @@ def main():
     tok = AutoTokenizer.from_pretrained(args.model)
     values, score, scorer_info = make_scorer(args.scorer, tok)
     token_bytes = make_token_bytes(tok)
-    tail_ok = args.scorer == "hotpot-stop"
+    tail_ok = args.scorer in STOP_SCORERS
     train, dropped = load_rows(args.train, token_bytes, args.max_prefix, tail_ok)
     dev, dev_dropped = load_rows(args.dev, token_bytes, args.max_prefix, tail_ok)
     dev = dev[: args.dev_limit]

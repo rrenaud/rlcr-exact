@@ -24,6 +24,7 @@ for path in glob.glob(f"{root}/run-*/train_*.jsonl"):
     g = os.path.join(root, run, "gen_eval", "gen_eval.json")
     gen = json.load(open(g)) if os.path.exists(g) else None
     cfg = (f"{a['objective']:7s} lr={a['lr']:<7g} W={a.get('answer_kl', 0):<6g} F={a.get('support_floor', 0):<6g}"
+           + (f" {a['scorer']}" if a.get("scorer", "hotpot") != "hotpot" else "")  # other row sets: not comparable
            + (f" k={a['samples_per_row']}" if a.get("samples_per_row", 1) > 1 else "")
            + (f" s{a['seed']}" if a.get("seed") else "")
            + (f" wsd={a.get('warmup_steps', 0)}/{a.get('decay_frac', 0):g}" if a.get("warmup_steps") or a.get("decay_frac") else ""))

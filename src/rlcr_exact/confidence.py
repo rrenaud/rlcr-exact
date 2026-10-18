@@ -82,6 +82,20 @@ def hotpot_stop_candidates(tokenizer) -> Candidates:
     return Candidates(strings, torch.tensor(vals), build_trie(seqs))
 
 
+def rlcr11_candidates(tokenizer) -> Candidates:
+    """The minimal format: 0.0, 0.1, ..., 0.9, 1.0 in RLCR-hotpot's spaced spelling, each through the stop:
+    `Ġ` `0` `.` `7` `Ġ</` `confidence` `>` `<|endoftext|>` (the checkpoint's only eos). Anything else (0.75, unspaced,
+    a junk token instead of the stop) is off the list and earns 0, so training teaches the format. One softmax after
+    `Ġ0.` covers the ten 0.d values; each value's own stop is scored exactly (it depends on the value). 60 nodes.
+    """
+    tid = tokenizer.convert_tokens_to_ids
+    texts = [f"0.{d}" for d in range(10)] + ["1.0"]
+    tail = [tid("Ġ</"), tid("confidence"), tid(">"), tid("<|endoftext|>")]
+    seqs = [[tid("Ġ")] + [tid(c) for c in t] + tail for t in texts]
+    return Candidates([f" {t} </confidence><|endoftext|>" for t in texts], torch.tensor([float(t) for t in texts]),
+                      build_trie(seqs))
+
+
 def rlcr_reward(values: torch.Tensor, correct: torch.Tensor) -> torch.Tensor:
     """RLCR's total reward for each well-formed candidate (malformed completions earn 0)."""
     y = correct.to(values.dtype)
