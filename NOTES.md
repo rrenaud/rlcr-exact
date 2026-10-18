@@ -573,6 +573,33 @@ Gradient logs of the best run (F 0.053) and of F 0.0077:
   the gain and cut the tax. Test: `--floor-decay-from 0.2` and `0.6` (beta linear to 0 from step 100 / 300) at the
   best exact config, against its seeds 0-2 with a constant floor.
 
+## Confidence format: rlcr11 (2026-10-18)
+
+The candidate list is now designed from the format, not mined from rollouts: `--scorer rlcr11` (TASK=hotpot-rlvr-11)
+scores 0.0 .. 0.9, 1.0 in the spaced spelling, each through `Ġ</ confidence > <|endoftext|>` (11 candidates, 60
+nodes). Everything else (0.75, unspaced, `<|im_end|>`, a junk tail) earns 0, so training teaches the format;
+tail-fault rows are kept. Every candidate is one support-floor level (no 0.d5 quirk).
+
+- Stop vs value (`stop_by_value.py`, run b9f02baa42, 500 dev rows): p(ending | v) depends on v. At base the close
+  `Ġ</` after 0.7-0.9 is 0.27-0.44 (the model wants a second digit); on adapters trained without the ending
+  scored, `Ġ</` is ~1 but eos is ~0.5 and the stop rises from ~0.36 (after 0.0) to ~0.51 (after 0.8). One shared
+  stop for all values turns the number gradient (median cosine 0.36-0.75 vs per-value), so endings are scored
+  per value. `confidence` is >= 0.99997 everywhere; eos is the real decision.
+- Layout check (check_trie_layout.py, run 72813b497d): every pair of layouts (none / trie interleaved / trie last /
+  per row, 133 or 499 nodes) differs by the same ~0.10 nats summed answer KL (max 0.25-0.38): the bf16 floor,
+  not the layout. The top-64 reference needs no packed rebuild.
+- Smoke (run d986989153, live KL): base list mass 0.25 (greedy leaves the list on 57% of rows); after 10 steps
+  0.997 (exact) / 0.995 (sampled). Step 10.6 s exact / 12.5 s sampled vs 17.3 / 21.9 s for hotpot-stop (499
+  nodes); 18.3 GB peak. Answer KL after 10 steps as for hotpot-stop (dev 0.69 vs 0.60).
+- Reference cache for the tail-ok rows (15,447): run eeac77918e (ref_topk_rlvr_stop.sh).
+
+TODO (deferred, keep the 60-node trie for now): trim the ending. The 44 ending nodes are ~10% of a packed group's
+tokens, ~6% of step time (~0.015 s/node/step). Once the format is learned the stop is ~1 for every value and
+"assume it stops" gives the same gradient; early on it does not (see above). Options: drop the `confidence` node
+(error < 1e-4, ~1.5%), or score endings for the first N steps then assume the stop while monitoring ending mass
+at eval. A sampled ending is not cheaper if unbiased (needs the stop for every value) and puts sampling noise back
+into the exact objective.
+
 ## Next steps (2026-10-17)
 
 In the queue (gpuq, `rlcr-hotpot-rlvr-*`):
@@ -585,7 +612,9 @@ In the queue (gpuq, `rlcr-hotpot-rlvr-*`):
 
 Then:
 - Seeds 1-2 for the best exact config and for sampled at the same config: the headline needs seed spread.
-- A packed-layout reference cache (or a dead zone on the KL), so the penalty measures drift and not bf16 noise.
+- ~~A packed-layout reference cache~~: not needed (layout check, see rlcr11 section); a dead zone on the KL for the
+  ~0.1-nat bf16 floor is still an option.
+- rlcr11 at the leader config (exact + sampled, 500 steps, tail-ok reference, gen check) after the cache.
 - Out-of-domain evals of the best adapter; Stage B (online GRPO with exact confidence reward) if Stage A holds up.
 
 Older plan items (math, digit-scorer default, HotpotQA rebuild) are done or dropped; see the sections above.
