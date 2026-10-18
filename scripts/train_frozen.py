@@ -328,6 +328,9 @@ def main():
                          "gradient norm, the cosines between terms and with the term's previous measurement (about 2 "
                          "extra backwards per measured step; 25 costs ~5%%). Use while tuning loss weights; leave it "
                          "off once training is stable (adam_fraction is always logged and costs nothing)")
+    ap.add_argument("--sampled-prepass", action="store_true",
+                    help="draw sampled completions from a separate no-grad forward even when the group is one forward "
+                         "(the old path; same draws, slower; for checking)")
     ap.add_argument("--ref-topk", default=None, help="ref_topk.py cache of --train for the penalty (default: live pass)")
     ap.add_argument("--max-prefix", type=int, default=4608)
     ap.add_argument("--train-problems", type=int, default=None,
@@ -432,15 +435,16 @@ def main():
         decompose = args.grad_decomp_every and step % args.grad_decomp_every == 0
         parts = {}
         for group in batch:
-            # Sampled: draw every row's completion first (no grad) so the group baseline is known.
-            if args.objective == "sampled":
-                draws = []
+            micro = args.micro_batch or (len(group) if packed else 1)
+            # Sampled: every row's draws are needed for the group baseline before any backward. With the group in
+            # one forward (packed), draw from that forward's own q; split into parts, draw first in a no-grad pass.
+            prepass = args.objective == "sampled" and (micro < len(group) or args.sampled_prepass)
+            if prepass:
                 with torch.no_grad():
                     qs = torch.cat([score(model, [r[1] for r in part]).exp().float()
                                     for part in chunks(group, len(group) if packed else args.eval_batch)])
                 draws = sample_draws(qs, [row.correct for row in group], values_gpu, args.samples_per_row)
                 baseline = np.mean([r for row_draws in draws for _, r in row_draws])
-            micro = args.micro_batch or (len(group) if packed else 1)
             for start in range(0, len(group), micro):
                 part = group[start: start + micro]
                 if args.answer_kl:
@@ -452,6 +456,9 @@ def main():
                 if args.objective == "exact":
                     loss = -expected.sum()
                 else:
+                    if not prepass:  # the whole group is this part
+                        draws = sample_draws(logps.detach().exp().float(), [row.correct for row in group], values_gpu, args.samples_per_row)
+                        baseline = np.mean([r for row_draws in draws for _, r in row_draws])
                     loss = sampled_loss(logps, draws[start: start + len(part)], baseline)
                 terms = [("objective", loss)]
                 if args.support_floor:
