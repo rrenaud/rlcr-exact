@@ -600,6 +600,69 @@ tokens, ~6% of step time (~0.015 s/node/step). Once the format is learned the st
 at eval. A sampled ending is not cheaper if unbiased (needs the stop for every value) and puts sampling noise back
 into the exact objective.
 
+## Hotpot rlcr11: exact vs sampled k (leader config lr 3.7e-4, W 0.02, F 0.053; 2026-10-18)
+
+| objective | dev3 Brier (seeds 0 / 1) | dev AUROC | test Brier (seeds 0 / 1) |
+|---|---|---|---|
+| exact | 0.181 / 0.187 | 0.80 | 0.202 / 0.202 |
+| k=64 | 0.182 | 0.80 | 0.204 |
+| k=16 | 0.186 | 0.80 | 0.205 |
+| k=4 | 0.196 / 0.192 | 0.78 | 0.205 / 0.212 |
+| k=2 | 0.197 | 0.78 | 0.207 |
+| k=1 (RLCR-style) | 0.214 / 0.210 | 0.74-0.78 | 0.222 / 0.190 |
+
+- Dev orders exact ~ k64 < k16 < k4 ~ k2 < k1 in every seed (seed spread ~0.005): exact is worth ~0.028 dev Brier
+  over one confidence sample per answer; matching it takes ~16-64 samples. k is nearly free in frozen training
+  (sampled scores the whole trie anyway); online it costs k short continuations after the answer.
+- Test does not separate k >= 4. k=1 seed 1's test 0.190 is underconfidence (mean conf 0.50 right / 0.28 wrong)
+  meeting the harder all-"hard" test set; it is among the worst on dev. Select and claim on dev.
+- lr was tuned for exact; k=1 lr checks (1.5e-4, 2.5e-4) and seed 2 are queued.
+- Released RLCR-hotpot on the paper's test: Brier 0.188 (eval file) / 0.196 (our reproduction); ours 0.205 from
+  generation with a confidence-only LoRA on RLVR-hotpot (gen check), with answer EM unchanged and stop +22 points.
+
+## Math from RLVR (2026-10-19)
+
+Start: `mehuldamani/big-math-digits-v2-correctness` (same data as RLCR-math, correctness reward; public, now in
+the shared hub). Probe `rlcr-math-uncal/run-20261019T050640Z-af3dc5c20a` (`probe_rlvr_math.sh`, tabc; `tag_spread.py`):
+
+| | RLVR-math dev | RLVR-math train | Qwen2.5-7B base dev | RLCR-math dev |
+|---|---|---|---|---|
+| accuracy (stripped EM) | 0.627 | 0.614 | 0.236 | 0.627 |
+| stops after </confidence> | ~50% (rest loops to 4096) | 49% | 96% | ~100% |
+| stated confidence | 1.0 on 93% | 1.0 | mean 0.93 | 7 values, mean 0.67 |
+| analysis states the value | 12% | 15% | 21% | 98% |
+| Brier / AUROC stated | 0.36 / 0.55 | 0.38 / 0.53 | 0.66 / 0.58 | 0.20 / 0.71 |
+
+- RLCR's labels are 0 when the format check fails, so the looping makes RLVR-math's raw cached accuracy 0.25.
+- Correction: 28% of rows with p("1") < 0.9 at the first digit is mostly format mass (`<`), not values. Digit-level
+  entropy is ~0.02 nats: the readout is nearly one-hot on 1.0 at the value level, but not copied from the analysis.
+- One stated number collapses the tag (base: entropy 0.69 -> 0.15 nats with a number in the analysis; RLCR-math
+  0.38 -> 0.000). Analyses that give a range without committing almost never occur naturally.
+
+**Prompt probe** (`rlcr-math-uncal/run-20261019T072732Z-636fd3e715`, `prompt_probe_math.sh`, `analyze_prompts.py`):
+analysis-only regeneration of the RLVR-math rollouts' `<think>...</answer>` under the 9 prompts of
+`math_prompts.py` (merged from our drafts and two outside reviews, `docs/math_prompt_brief.md`); 297 dev greedy +
+390 train at T=0.7; labels prompt-independent (accuracy 0.616 / 0.631).
+- **The hidden state at the tag already carries the signal, whatever the prompt.** A linear probe (5-fold grouped by
+  problem) gets dev AUROC 0.73-0.75 for every prompt (control 0.738; train 0.74-0.77), above RLCR-math's stated
+  0.705. Paired bootstrap vs control: no prompt moves probe AUROC beyond +-0.05 (CIs all include 0; rubric -0.043).
+- Expected-confidence AUROC (frozen readout): control 0.675; rederive +0.044 [-0.009, +0.096], verify +0.035,
+  weakest +0.026; range -0.026, rubric -0.021. Stated confidence stays ~1.0 everywhere (mean 0.93-0.999); rubric
+  is the only prompt that moves it (1.0 on 66%, Brier 0.33, stated AUROC 0.61).
+- **Range fails as predicted by one review:** 95% write the line, width 0.10 on average ("0.9 to 1.0"), and the tag
+  copies the upper end 97% of the time (midpoint 6%). An interval does not keep the tag uncertain; it hands it a
+  number to copy.
+- No-number compliance is high everywhere (1.3-5.7% of analyses with a confidence-like number; the regex also
+  counts math percentages). Analyses 100-220 words; <= 3% hit the 1024-token cap.
+- **Scorer caveat:** the first scoring required `</confidence>` to close with `>`; the model's usual closing is the
+  merged `>\n` token, so legal mass (0.03-0.77), value entropy and gradient size above are biased (q is
+  conditioned on the rare `>` close). Rescore with both closings queued (`rescore_prompt_probe.sh`). Probe AUROC,
+  stated values and the range result do not depend on the candidates.
+- Implication: prompt choice matters little for what a trained readout can extract; it matters for format and the
+  starting entropy. The RLVR-math cache (think+answer prefixes, stop at </answer>, `cache_rlvr_math.sh`) is
+  running; next is analysis regeneration under 1-2 prompts and a math rlcr11-style scorer (newline spelling,
+  `>` or `>\n` close, `<|endoftext|>`), then exact vs sampled.
+
 ## Next steps (2026-10-17)
 
 In the queue (gpuq, `rlcr-hotpot-rlvr-*`):
