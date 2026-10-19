@@ -3,7 +3,7 @@
 # full rollouts of math_fresh dev and test under PROMPT with the adapter on (gen_math.py), compared by
 # gen_eval_math.py with the base model under the same prompt. The base rollouts are generated into BASE_DIR the first
 # time (shared by every run with that prompt). Writes OUT_DIR/gen_eval_math/{gen_math_*.jsonl,gen_eval_math.json}.
-# usage: gen_eval_math.sh PROMPT ADAPTER_DIR OUT_DIR BASE_DIR
+# usage: gen_eval_math.sh PROMPT ADAPTER_DIR|none OUT_DIR BASE_DIR   (none: regenerate the base, the noise floor of "answer changed")
 prompt=$1 adapter=$2 out=$3/gen_eval_math base=$4
 export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_CACHE=/scratch/hf/hub HF_DATASETS_CACHE=/home/rrenaud/.cache/huggingface/datasets HF_HUB_OFFLINE=1
 GEN="timeout 5400 /home/rrenaud/envs/vllm/bin/python /home/rrenaud/rlcr-exact/scripts/gen_math.py --prompt $prompt"
@@ -13,6 +13,6 @@ for split in dev test; do
   if [ ! -s "$base/gen_math_$split.jsonl" ]; then  # write elsewhere, then move: a failed run leaves no partial file
     $GEN --data $D --out "$base/gen_math_$split.jsonl.part" && mv "$base/gen_math_$split.jsonl.part" "$base/gen_math_$split.jsonl" || echo "FAILED base gen $split"
   fi
-  $GEN --data $D --adapter "$adapter" --out "$out/gen_math_$split.jsonl" || echo "FAILED gen $split"
+  $GEN --data $D $([ "$adapter" != none ] && echo --adapter $adapter) --out "$out/gen_math_$split.jsonl" || echo "FAILED gen $split"
 done
 /home/rrenaud/envs/pytorch/bin/python /home/rrenaud/rlcr-exact/scripts/gen_eval_math.py --base "$base" --lora "$out" --out "$out/gen_eval_math.json"
