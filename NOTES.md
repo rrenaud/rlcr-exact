@@ -643,25 +643,34 @@ the shared hub). Probe `rlcr-math-uncal/run-20261019T050640Z-af3dc5c20a` (`probe
 analysis-only regeneration of the RLVR-math rollouts' `<think>...</answer>` under the 9 prompts of
 `math_prompts.py` (merged from our drafts and two outside reviews, `docs/math_prompt_brief.md`); 297 dev greedy +
 390 train at T=0.7; labels prompt-independent (accuracy 0.616 / 0.631).
+Numbers below are from the rescore with both closings (`run-20261019T091622Z-ee92567dfc`; the first scoring,
+636fd3e715's own, required a bare `>` close and was biased).
 - **The hidden state at the tag already carries the signal, whatever the prompt.** A linear probe (5-fold grouped by
-  problem) gets dev AUROC 0.73-0.75 for every prompt (control 0.738; train 0.74-0.77), above RLCR-math's stated
-  0.705. Paired bootstrap vs control: no prompt moves probe AUROC beyond +-0.05 (CIs all include 0; rubric -0.043).
-- Expected-confidence AUROC (frozen readout): control 0.675; rederive +0.044 [-0.009, +0.096], verify +0.035,
-  weakest +0.026; range -0.026, rubric -0.021. Stated confidence stays ~1.0 everywhere (mean 0.93-0.999); rubric
-  is the only prompt that moves it (1.0 on 66%, Brier 0.33, stated AUROC 0.61).
+  problem) gets dev AUROC 0.72-0.75 for every prompt (control 0.731; train 0.72-0.77), above RLCR-math's stated
+  0.705. Paired bootstrap vs control: no prompt moves probe AUROC beyond +-0.05 (CIs all include 0; rubric -0.044).
+- Expected-confidence AUROC (frozen readout, dev): control 0.687; verify +0.030 [-0.026, +0.092], rederive +0.016,
+  weakest +0.014; range -0.050, rubric -0.043. None significant. Stated confidence stays ~1.0 everywhere (mean
+  0.93-0.999); rubric is the only prompt that moves it (1.0 on 66%, Brier 0.33, stated AUROC 0.61).
+- **Stopping is the prompt-dependent quantity.** The `>\n` close is never followed by an end token (p ~ 0.000 for
+  every prompt): it is the looping path. Only `>` + `<|endoftext|>` stops (`<|im_end|>` ~ 0). Legal mass (value +
+  `>` + eos), dev: control 0.062, weakest 0.034, rubric 0.027, competing 0.099, falsify 0.114, range 0.180,
+  rederive 0.239, verify 0.293, **verify_open 0.769** (it closes with `>` 84% of the time, others 17-55%). Value
+  mass through `</confidence` is 0.96-1.0 for all; ~0.15-0.2 of it under most prompts goes to other closings.
+  With RLCR's reward (off-list mass earns 0) the exact objective's gradient under control would be mostly "learn to
+  stop" (grad size 0.058 vs 0.29 for verify_open). Value entropy over the 11 levels: 0.11-0.31 nats for the tabc
+  guides, 0.56-0.65 for verify_open and rubric.
 - **Range fails as predicted by one review:** 95% write the line, width 0.10 on average ("0.9 to 1.0"), and the tag
   copies the upper end 97% of the time (midpoint 6%). An interval does not keep the tag uncertain; it hands it a
   number to copy.
-- No-number compliance is high everywhere (1.3-5.7% of analyses with a confidence-like number; the regex also
-  counts math percentages). Analyses 100-220 words; <= 3% hit the 1024-token cap.
-- **Scorer caveat:** the first scoring required `</confidence>` to close with `>`; the model's usual closing is the
-  merged `>\n` token, so legal mass (0.03-0.77), value entropy and gradient size above are biased (q is
-  conditioned on the rare `>` close). Rescore with both closings queued (`rescore_prompt_probe.sh`). Probe AUROC,
-  stated values and the range result do not depend on the candidates.
-- Implication: prompt choice matters little for what a trained readout can extract; it matters for format and the
-  starting entropy. The RLVR-math cache (think+answer prefixes, stop at </answer>, `cache_rlvr_math.sh`) is
-  running; next is analysis regeneration under 1-2 prompts and a math rlcr11-style scorer (newline spelling,
-  `>` or `>\n` close, `<|endoftext|>`), then exact vs sampled.
+- No-number compliance is high everywhere (1.3-8% of analyses with a confidence-like number; the regex also
+  counts math percentages). Analyses 100-220 words; <= 4% hit the 1024-token cap.
+- Implication: prompt choice matters little for what a trained readout can extract; it matters for stopping and the
+  starting entropy. **Pilot prompts: verify_open (stops, highest entropy) and rederive** (control dropped: 6% legal
+  mass confounds it). RLVR-math cache `rlcr-math-rlvr-cache/run-20261019T072732Z-a698e7495d` (think+answer, stop at
+  </answer>): accuracy 0.695 test / 0.683 dev / 0.701 train (16k rows), 98-99% reach </answer>. Prep
+  (`math_pilot_prep.sh verify_open rederive`, `rlcr-math-pilot/run-20261019T104921Z-8611e96354`) regenerates the
+  analysis and builds the reference; then exact vs sampled with `TASK=math-rlvr`, scorer `rlcr11-math` (its
+  `>\n` + eos candidates carry ~0 mass, harmless).
 
 ## Next steps (2026-10-17)
 
