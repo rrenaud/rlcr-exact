@@ -1,9 +1,9 @@
 """Score regenerated analyses (regen_analysis.py output) at the confidence tag with the trie scorer.
 
 For each row whose generation contains "<confidence", the prefix is the prompt + cached answer prefix + generated
-tokens through that tag's `confidence` token. Candidates continue `>\\n` d `.` d `\\n</confidence>` then an end
-token (<|im_end|> or <|endoftext|>): 11 values x 2 ends, plus each value without its end (so p(end | value) is
-known). Writes per-row JSON (log-probs of all candidates) and the final hidden state at the prefix (fp16) for a
+tokens through that tag's `confidence` token. Candidates continue `>\\n` d `.` d `\\n</` `confidence`: each value through
+`confidence` (its mass whatever the closing), then each closing (`>` or `>\\n`) with and without an end token
+(<|im_end|> or <|endoftext|>), so p(close, end | value) is known. Writes per-row JSON (log-probs of all candidates) and the final hidden state at the prefix (fp16) for a
 linear probe.
 
 usage: score_analysis.py --model M --regen R.jsonl --out OUT_PREFIX      (pytorch env, gpuq payload)
@@ -28,13 +28,17 @@ tok = AutoTokenizer.from_pretrained(a.model)
 tid = tok.convert_tokens_to_ids
 VALUES = [f"0.{d}" for d in range(10)] + ["1.0"]
 ENDS = ["<|im_end|>", "<|endoftext|>"]
-seqs, meta = [], []  # meta: (value, end or None)
+CLOSES = [">", ">\n"]  # the model often merges the closing bracket with a newline
+seqs, meta = [], []  # meta: (value, close or None, end or None); close None = the value through `confidence`
 for v in VALUES:
     body = tok.encode(">\n" + v + "\n</confidence>", add_special_tokens=False)
     assert tok.decode(body[:1]) == ">\n" and len(body) == 8, (v, [tok.decode([t]) for t in body])
-    for e in ENDS:
-        seqs.append(body + [tid(e)]); meta.append((float(v), e))
-    seqs.append(body); meta.append((float(v), None))
+    stem = body[:-1]
+    seqs.append(stem); meta.append((float(v), None, None))
+    for c in CLOSES:
+        seqs.append(stem + [tid(c)]); meta.append((float(v), c, None))
+        for e in ENDS:
+            seqs.append(stem + [tid(c), tid(e)]); meta.append((float(v), c, e))
 trie = build_trie(seqs)
 CONF = tid("confidence")
 
@@ -81,7 +85,7 @@ with open(a.out + ".jsonl", "w") as f:
     for r, s in zip(rows, scored):
         f.write(json.dumps(dict(prompt=r["prompt"], split=r["split"], id=r["id"], j=r["j"], correct=r["correct"],
                                 gen=r["gen"], gen_tokens=len(r["gen_ids"]), finish=r["finish"], **s)) + "\n")
-json.dump(dict(values=[m[0] for m in meta], ends=[m[1] for m in meta]), open(a.out + ".candidates.json", "w"))
+json.dump(dict(values=[m[0] for m in meta], closes=[m[1] for m in meta], ends=[m[2] for m in meta]), open(a.out + ".candidates.json", "w"))
 np.save(a.out + ".hidden.npy", hidden)
 print(json.dumps(dict(event="done", rows=len(rows), tagged=sum(bool(s and s.get("has_tag")) for s in scored),
                       seconds=round(time.time() - t0))), flush=True)

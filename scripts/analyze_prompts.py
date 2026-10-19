@@ -1,8 +1,8 @@
 """Compare prompts from the math prompt probe (score_analysis.py outputs), per prompt and split.
 
-Per row, from the trie log-probs of the 11 values x {<|im_end|>, <|endoftext|>} (and each value without its end):
-legal mass (well-formed value + end), q over the 11 values (renormalized over legal), entropy, expected confidence,
-p(end | value), and the exact-objective gradient size sum_j |q_j (R_j - J)| with RLCR's reward (off-list mass earns
+Per row, from the trie log-probs (score_analysis.py): value mass (the 11 values through `</confidence`), q over the
+11 values (renormalized), entropy, expected confidence, legal mass (value + closing + end token, i.e. well-formed
+and stopped), p(stop) = legal / value mass, and the exact-objective gradient size sum_j |q_j (R_j - J)| with RLCR's reward (off-list mass earns
 0). Per prompt: compliance (confidence-like numbers in the analysis), stated/expected Brier and AUROC, a linear
 probe's AUROC on the tag hidden state (5-fold, grouped by problem, dev + train pooled), and for `range` the endpoint /
 midpoint / within-range rates. Dev AUROCs get a problem-level paired bootstrap against control.
@@ -40,8 +40,9 @@ for split in ("dev", "train"):
     if not os.path.exists(p + ".jsonl"):
         continue
     cand = json.load(open(p + ".candidates.json"))
-    vals, ends = np.array(cand["values"]), cand["ends"]
-    with_end = np.array([e is not None for e in ends])
+    vals, closes, ends = np.array(cand["values"]), cand["closes"], cand["ends"]
+    stem = np.array([c is None for c in closes])  # each value through `confidence`
+    with_end = np.array([e is not None for e in ends])  # value, closing, end token: well-formed and stopped
     grid = np.round(np.linspace(0, 1, 11), 1)
     hid = np.load(p + ".hidden.npy")
     for k, line in enumerate(open(p + ".jsonl")):
@@ -57,16 +58,16 @@ for split in ("dev", "train"):
         H.append(hid[k])
         if r.get("has_tag"):
             lp = np.array(r["logps"]); p_all = np.exp(lp)
+            pv = np.array([p_all[stem & (vals == g)].sum() for g in grid])  # p(value), whatever follows
             pe = p_all[with_end]; ve = vals[with_end]
             legal = pe.sum()
-            q = np.array([pe[ve == g].sum() for g in grid]) / max(legal, 1e-12)
-            noend = np.array([p_all[(~with_end) & (vals == g)].sum() for g in grid])
+            q = pv / max(pv.sum(), 1e-12)
             y = r["correct"]
             R = 0.5 * (1 + y + 1 - (y - ve) ** 2)
             J = (pe * R).sum()
             qq = q[q > 0]
-            r.update(legal=legal, q=q, ent=float(-(qq * np.log(qq)).sum()), exp_conf=float((q * grid).sum()),
-                     p_end=float((np.array([pe[ve == g].sum() for g in grid]) / np.maximum(noend, 1e-12) * q).sum()),
+            r.update(legal=legal, value_mass=float(pv.sum()), q=q, ent=float(-(qq * np.log(qq)).sum()),
+                     exp_conf=float((q * grid).sum()), p_end=float(legal / max(pv.sum(), 1e-12)),
                      grad=float(np.abs(pe * (R - J)).sum() + (1 - legal) * J), exp_brier=float((q * (grid - y) ** 2).sum()))
         rows.append(r)
 H = np.stack(H).astype(np.float32)
@@ -100,6 +101,7 @@ for name, rs in by.items():
         ys = np.array([r["correct"] for r in st]); cs = np.array([r["stated"] for r in st])
         e = np.array([r["exp_conf"] for r in t]); pr = np.array([probe[(r["split"], r["id"], r["j"])] for r in t])
         d = dict(rows=len(s), tag=len(t) / len(s), stated_ok=len(st) / len(s), acc=float(y.mean()),
+                 value_mass=float(np.mean([r["value_mass"] for r in t])),
                  legal=float(np.mean([r["legal"] for r in t])), p_end=float(np.mean([r["p_end"] for r in t])),
                  ent=float(np.mean([r["ent"] for r in t])), ent_gt_0_1=float(np.mean([r["ent"] > 0.1 for r in t])),
                  grad=float(np.mean([r["grad"] for r in t])), mean_stated=float(cs.mean()) if len(cs) else float("nan"),
@@ -134,7 +136,7 @@ if "control" in dev_scores:
             v = np.array(diffs[key]); v = v[~np.isnan(v)]
             summary[(name, "dev")][f"d_auroc_{key}_vs_control"] = (float(np.mean(v)), float(np.percentile(v, 2.5)), float(np.percentile(v, 97.5)))
 
-cols = ["rows", "tag", "legal", "p_end", "ent", "ent_gt_0_1", "grad", "mean_stated", "distinct_stated", "brier_stated",
+cols = ["rows", "tag", "value_mass", "legal", "p_end", "ent", "ent_gt_0_1", "grad", "mean_stated", "distinct_stated", "brier_stated",
         "exp_brier", "auroc_stated", "auroc_exp", "auroc_probe", "conf_numbers", "an_words", "hit_cap"]
 for split in ("dev", "train"):
     print(f"\n== {split}")
