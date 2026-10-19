@@ -708,6 +708,24 @@ verify_open, adapter vs base model under the same prompt (base rollouts shared i
 - Calibration holds in free generation: the generated confidence matches the trainer's cached-answer readout
   (test Brier 0.150 vs 0.152) and beats RLCR-math's stated confidence (0.204 / 0.705 on the earlier probe) with a
   Stage A LoRA on cached rollouts. Strict accuracy rises 0.61 -> 0.68 because the adapter stops.
+- **Against the paper, same test set.** `math_fresh_test` is big-math-digits' own test split: all 1,000 problems
+  match RLCR's released eval file (`RLCR/eval_outputs/Math-models/big-math-digits`; greedy, 4,096 tokens, n=1, as
+  ours). Regraded with the paper's own grader (`gen_correctness_reward`: last <answer>, math-verify then EM, no
+  format gate; `confidence_extractor`, missing = 0), the adapter's test: accuracy 0.693, Brier 0.147, ECE 0.034,
+  AUROC 0.819 (base RLVR under verify_open: 0.683 / 0.276 / 0.274 / 0.589). The eval file (their grader):
+
+  | test, paper eval file | acc | Brier | ECE | AUROC | ours minus it: Brier [95%] | AUROC [95%] |
+  |---|---|---|---|---|---|---|
+  | RLVR | 0.654 | 0.319 | 0.300 | 0.50 | | |
+  | RLCR | 0.687 | 0.181 | 0.050 | 0.726 | -0.034 [-0.047, -0.022] | +0.093 [+0.058, +0.129] |
+  | SFT-RLCR | 0.705 | 0.154 | 0.037 | 0.792 | -0.007 [-0.019, +0.006] | +0.026 [-0.005, +0.059] |
+  | RLVR-Classifier (separate ORM) | 0.688 | 0.164 | 0.052 | 0.810 | -0.017 [-0.031, -0.003] | +0.009 [-0.022, +0.039] |
+
+  Paired problem-level bootstrap. Not identical: our system prompt is verify_open (theirs gen / tabc); the paper
+  re-prompts for a missing confidence (we score 0, 3% of rows); one seed of ours vs their released checkpoints;
+  hyperparameters came from hotpot and the prompt from the dev probe (test unused for selection). The eval-file
+  numbers are recomputed here, not checked against the paper's printed table. The earlier RLCR-math 0.204 / 0.705
+  was our dev probe, not this test set.
 - Pending: verify_open sampled k=1 and rederive exact / k=1 (queued, each ends with this check).
 
 ## Next steps (2026-10-17)
