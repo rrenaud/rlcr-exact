@@ -43,7 +43,7 @@ from sklearn.metrics import roc_auc_score
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from rlcr_exact.confidence import exact_objective, hotpot_candidates, hotpot_stop_candidates, level_matrix, make_candidates, rlcr11_candidates, rlcr_reward, support_floor
+from rlcr_exact.confidence import exact_objective, hotpot_candidates, hotpot_stop_candidates, level_matrix, make_candidates, rlcr11_candidates, rlcr11_math_candidates, rlcr_reward, support_floor
 from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
 from rlcr_exact.grading import em_correct, f1_correct, tail_only_failure
 from rlcr_exact.trie_score import packed_candidate_logps
@@ -98,7 +98,8 @@ def make_scorer(name, tok):
         score = lambda model, prefixes, greedy=False, hidden=False: level_logps(model, prefixes, ids, greedy, hidden)
         return LEVELS, score, dict(levels=len(LEVELS))
     cands = (hotpot_candidates(tok) if name == "hotpot" else hotpot_stop_candidates(tok) if name == "hotpot-stop"
-             else rlcr11_candidates(tok) if name == "rlcr11" else make_candidates(tok))
+             else rlcr11_candidates(tok) if name == "rlcr11" else rlcr11_math_candidates(tok) if name == "rlcr11-math"
+             else make_candidates(tok))
 
     def score(model, prefixes, greedy=False, hidden=False):
         # One packed forward: the rows' common start (a question's prompt, shared by its rollouts) runs once.
@@ -292,10 +293,11 @@ def main():
     ap.add_argument("--model", default=None, help="default: the released checkpoint for the scorer's task")
     ap.add_argument("--train", required=True); ap.add_argument("--dev", required=True); ap.add_argument("--test")
     ap.add_argument("--objective", choices=["exact", "sampled"], required=True)
-    ap.add_argument("--scorer", choices=["digit", "trie", "hotpot", "hotpot-stop", "rlcr11"], default="digit",
+    ap.add_argument("--scorer", choices=["digit", "trie", "hotpot", "hotpot-stop", "rlcr11", "rlcr11-math"], default="digit",
                     help="hotpot-stop: the hotpot candidates through `confidence>` + end token, and rows whose only fault is the "
                          "tail after </confidence> are kept (needs a reference cache built with ref_topk.py --tail-ok); rlcr11: only "
-                         "0.0 .. 1.0 in the spaced spelling, each through the end token, same rows as hotpot-stop")
+                         "0.0 .. 1.0 in the spaced spelling, each through the end token, same rows as hotpot-stop; rlcr11-math: "
+                         "0.0 .. 1.0 in RLVR-math's newline spelling, closed by > or >\\n, then <|endoftext|>")
     ap.add_argument("--micro-batch", type=int, default=None,
                     help="rows per forward/backward when training (default: a whole problem group for the trie "
                          "scorers, whose rows share the prompt and are packed into one forward; 1 for digit)")
@@ -339,8 +341,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     args = ap.parse_args()
-    packed = args.scorer in ("trie", "hotpot", "hotpot-stop", "rlcr11")
+    packed = args.scorer in ("trie", "hotpot", "hotpot-stop", "rlcr11", "rlcr11-math")
     args.model = args.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if args.scorer.startswith("hotpot") or args.scorer == "rlcr11"
+                                else "mehuldamani/big-math-digits-v2-correctness" if args.scorer == "rlcr11-math"
                                 else "mehuldamani/big-math-digits-v2-brier-base-tabc")
     random.seed(args.seed); torch.manual_seed(args.seed)
     run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_W{args.answer_kl:g}_s{args.seed}"

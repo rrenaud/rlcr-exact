@@ -96,6 +96,25 @@ def rlcr11_candidates(tokenizer) -> Candidates:
                       build_trie(seqs))
 
 
+def rlcr11_math_candidates(tokenizer) -> Candidates:
+    """rlcr11 for RLVR-math's newline spelling. The prefix ends at `confidence` (cut_point drops the straddling `>\\n`):
+    `>\\n` `0` `.` `7` `\\n` `</` `confidence`, then the close `>` or the merged `>\\n` (the model's usual; RLCR's
+    format check allows trailing whitespace), then `<|endoftext|>` (the checkpoint's eos). 22 candidates, two
+    spellings per level; anything else (two decimals, spaces, no stop) earns 0.
+    """
+    texts = [f"0.{d}" for d in range(10)] + ["1.0"]
+    eos = tokenizer.convert_tokens_to_ids("<|endoftext|>")
+    strings, values, seqs = [], [], []
+    for t in texts:
+        for close in (">", ">\n"):
+            ids = tokenizer(f">\n{t}\n</confidence{close}", add_special_tokens=False).input_ids
+            assert len(ids) == 8, (t, close, ids)  # >\n d . d \n </ confidence close
+            strings.append(f">\n{t}\n</confidence{close}<|endoftext|>")
+            values.append(float(t))
+            seqs.append(ids + [eos])
+    return Candidates(strings, torch.tensor(values), build_trie(seqs))
+
+
 def rlcr_reward(values: torch.Tensor, correct: torch.Tensor) -> torch.Tensor:
     """RLCR's total reward for each well-formed candidate (malformed completions earn 0)."""
     y = correct.to(values.dtype)
