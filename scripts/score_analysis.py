@@ -36,9 +36,11 @@ for v in VALUES:
     stem = body[:-1]
     seqs.append(stem); meta.append((float(v), None, None))
     for c in CLOSES:
-        seqs.append(stem + [tid(c)]); meta.append((float(v), c, None))
+        cid = tok.encode(">\n" + v + "\n</confidence" + c, add_special_tokens=False)  # token names differ from text
+        assert cid[:-1] == stem and len(cid) == 8, (v, c)
+        seqs.append(cid); meta.append((float(v), c, None))
         for e in ENDS:
-            seqs.append(stem + [tid(c), tid(e)]); meta.append((float(v), c, e))
+            seqs.append(cid + [tid(e)]); meta.append((float(v), c, e))
 trie = build_trie(seqs)
 CONF = tid("confidence")
 
