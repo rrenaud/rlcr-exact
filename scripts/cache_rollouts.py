@@ -30,6 +30,9 @@ ap.add_argument("--topk", type=int, default=64)
 ap.add_argument("--limit", type=int, default=None)
 ap.add_argument("--chunk", type=int, default=250, help="questions per generate call")
 ap.add_argument("--util", type=float, default=0.9)
+ap.add_argument("--stop-at-answer", action="store_true",
+                help="stop at the first </answer> (prefixes for analysis-only regeneration); labels then grade the "
+                     "prefix plus a canonical analysis/confidence, so they do not depend on what would follow")
 ap.add_argument("--out", required=True)
 a = ap.parse_args()
 sys.path.insert(0, a.rlcr)
@@ -47,7 +50,9 @@ tok = llm.get_tokenizer()
 token_bytes = make_token_bytes(tok)
 sys_prompt = get_sys_prompt("tabc")
 params = SamplingParams(n=a.k, temperature=a.temperature, top_p=1.0, max_tokens=a.max_new, seed=a.seed,
-                        stop_token_ids=[tok.convert_tokens_to_ids("<|im_end|>")], logprobs=a.topk, flat_logprobs=True)
+                        stop_token_ids=[tok.convert_tokens_to_ids("<|im_end|>")], logprobs=a.topk, flat_logprobs=True,
+                        **(dict(stop=["</answer>"], include_stop_str_in_output=True) if a.stop_at_answer else {}))
+CANON = "\n<analysis>\nx\n</analysis>\n<confidence>\n0.5\n</confidence>" if a.stop_at_answer else ""
 policy = dict(base=a.model, adapter=None, adapter_sha256_16=None, iter=None, seed=a.seed, temperature=a.temperature,
               logprobs_mode="raw_logprobs")
 print(json.dumps(dict(event="start", split=split, questions=len(rows), todo=len(todo), k=a.k,
@@ -63,7 +68,7 @@ for c in range(0, len(todo), a.chunk):
     dt, ntok = time.time() - t, sum(len(o.token_ids) for r in res for o in r.outputs)
     with open(a.out, "a") as f, gzip.open(a.out + ".topk.jsonl.gz", "at") as topf:
         for (i, ex), r in zip(chunk, res):
-            completions = [[{"role": "assistant", "content": o.text}] for o in r.outputs]
+            completions = [[{"role": "assistant", "content": o.text + CANON}] for o in r.outputs]
             f.write(json.dumps(dict(
                 idx=i, id=ex["id"], task="math", split=split, problem=ex["problem"], answer=ex["answer"],
                 source=ex["source"], llama8b_solve_rate=ex["llama8b_solve_rate"], policy=policy,
