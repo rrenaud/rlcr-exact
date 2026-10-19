@@ -1,6 +1,7 @@
 #!/bin/bash
 # One Stage A run (gpuq payload): [TASK=math|math-rlvr|hotpot|hotpot-rlvr|hotpot-rlvr-stop|hotpot-rlvr-11] run_frozen.sh OBJECTIVE LR SEED [extra train_frozen.py args]
-# math-rlvr: MATH_C=<math_pilot_prep.sh output dir for one prompt> (pass its --ref-topk MATH_C/ref_topk_train)
+# math-rlvr: MATH_C=<math_pilot_prep.sh output dir for one prompt> (pass its --ref-topk MATH_C/ref_topk_train); ends with
+# gen_eval_math.sh under that prompt (base rollouts shared in MATH_C/gen_base)
 export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_CACHE=/scratch/hf/hub HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 case "${TASK:-math}" in hotpot-rlvr|hotpot-rlvr-stop|hotpot-rlvr-11) RLVR=1;; *) RLVR=0;; esac
 if [ $RLVR = 1 ]; then  # uncalibrated start: RLVR-hotpot
@@ -23,4 +24,7 @@ obj=$1 lr=$2 seed=$3; shift 3
 # GEN_EVAL=0 skips it. The adapter is the one checkpoint this run saved.
 if [ "$T" = hotpot ] && [ "${GEN_EVAL:-1}" != 0 ]; then
   bash scripts/gen_eval.sh "$(ls -d ${GPUQ_RUN_DIR:-.}/checkpoints/*/ | head -1)" $C ${GPUQ_RUN_DIR:-.} $G
+fi
+if [ "${TASK:-math}" = math-rlvr ] && [ "${GEN_EVAL:-1}" != 0 ]; then
+  bash scripts/gen_eval_math.sh "$(basename $C)" "$(ls -d ${GPUQ_RUN_DIR:-.}/checkpoints/*/ | head -1)" ${GPUQ_RUN_DIR:-.} $C/gen_base
 fi
