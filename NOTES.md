@@ -672,6 +672,44 @@ Numbers below are from the rescore with both closings (`run-20261019T091622Z-ee9
   analysis and builds the reference; then exact vs sampled with `TASK=math-rlvr`, scorer `rlcr11-math` (its
   `>\n` + eos candidates carry ~0 mass, harmless).
 
+**Math pilot, first run** (`rlcr-math-pilot/run-20261019T142426Z-e678e8eb65`: verify_open, exact, rlcr11-math, lr
+3.7e-4, W 0.02, floor 0.053, 500 steps, `--micro-batch 2` — a whole 8-rollout group in one forward OOMs on math's
+~1,500-token rows). Trainer evals (cached answers, greedy readout):
+
+| | dev step 0 | dev step 500 | test step 500 | RLCR-math stated (probe, dev) |
+|---|---|---|---|---|
+| Brier | 0.293 | 0.155 | 0.152 | 0.204 |
+| ECE | 0.294 | 0.042 | 0.023 | |
+| AUROC | 0.58 | 0.82 | 0.81 | 0.705 |
+| mean confidence (accuracy ~0.69) | 0.98 | 0.71 | 0.72 | 0.67 |
+| well-formed stop mass | 0.75 | 1.00 | 1.00 | |
+
+Stopping is learned within ~10 steps. Answer KL 0.43 at step 0 (the bf16 packed-layout floor; 0.0004/token) ->
+0.57 at step 500.
+
+**Math generation check** (`gen_math.py`, `gen_eval_math.py`, `gen_eval_math.sh`; run
+`rlcr-math-pilot/run-20261019T164450Z-748a7e8142`): greedy full rollouts of math_fresh dev/test (1,000 each) under
+verify_open, adapter vs base model under the same prompt (base rollouts shared in `<prep>/verify_open/gen_base`).
+`run_frozen.sh TASK=math-rlvr` now ends with it.
+
+| | dev base | dev adapter | test base | test adapter |
+|---|---|---|---|---|
+| accuracy (format-free) | 0.681 | 0.678 | 0.678 | 0.687 |
+| accuracy delta [95% CI] | | -0.003 [-0.021, +0.015] | | +0.009 [-0.008, +0.026] |
+| strict (RLCR's, format-gated) | 0.626 | 0.675 | 0.607 | 0.684 |
+| stops after </confidence> | 0.886 | 0.967 | 0.875 | 0.970 |
+| truncated at 4,096 | 0.087 | 0.033 | 0.097 | 0.030 |
+| mean confidence (correct / wrong) | 0.989 (0.994 / 0.976) | 0.709 (0.785 / 0.534) | 0.983 | 0.718 (0.790 / 0.545) |
+| Brier / ECE / AUROC | 0.284 / 0.285 / 0.56 | 0.149 / 0.041 / 0.82 | 0.289 / 0.287 / 0.55 | 0.150 / 0.031 / 0.80 |
+
+- The adapter does not hurt answers (deltas within +-0.02; flips balanced, right->wrong 4.7% / wrong->right 4.4%
+  on dev). 17% of first-<answer> strings differ, but there is no base-vs-base regeneration yet, so the share due
+  to vLLM batching nondeterminism is unknown (hotpot needed that control).
+- Calibration holds in free generation: the generated confidence matches the trainer's cached-answer readout
+  (test Brier 0.150 vs 0.152) and beats RLCR-math's stated confidence (0.204 / 0.705 on the earlier probe) with a
+  Stage A LoRA on cached rollouts. Strict accuracy rises 0.61 -> 0.68 because the adapter stops.
+- Pending: verify_open sampled k=1 and rederive exact / k=1 (queued, each ends with this check).
+
 ## Next steps (2026-10-17)
 
 In the queue (gpuq, `rlcr-hotpot-rlvr-*`):
