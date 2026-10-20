@@ -39,6 +39,12 @@ def runs():
             continue
         F, decay = a.get("support_floor") or 0, a.get("floor_decay_from")
         floor = "" if (F, decay) == (0.053, None) else f" F{F:g}" + (f"->0 from {decay:g}" if decay is not None else "")
+        offset = 0
+        if a.get("init_adapter"):  # a continuation: label it, and plot its steps after its parent's
+            parent = glob.glob(os.path.join(os.path.dirname(os.path.dirname(a["init_adapter"].rstrip("/"))), "train_*.jsonl"))
+            offset = load(parent[0], os.path.getmtime(parent[0]))[0].get("args", {}).get("steps", 0) if parent else 0
+            floor += " cont"
+            evals, train, grad = ([dict(e, step=e["step"] + offset) for e in xs] for xs in (evals, train, grad))
         n_q = data.get("train_problems") or 0
         obj = "exact" if a["objective"] == "exact" else "k=1"
         size = f"{round(n_q / 1000)}k" if n_q else "?"
@@ -47,7 +53,7 @@ def runs():
         if os.path.exists(outcome) and json.load(open(outcome)).get("cancelled"):  # a cancelled run's partial log
             continue
         g = os.path.join(run_dir, "gen_eval", "gen_eval.json")
-        out.append(dict(obj=obj, data=size + floor, seed=a.get("seed", 0), train=train, grad=grad, steps=a["steps"], n_q=n_q,
+        out.append(dict(obj=obj, data=size + floor, seed=a.get("seed", 0), train=train, grad=grad, offset=offset, steps=a["steps"], n_q=n_q,
                         ppstep=a.get("problems_per_step", 4), evals=evals, run=os.path.basename(run_dir),
                         gen=json.load(open(g)) if os.path.exists(g) else None,
                         done=os.path.exists(os.path.join(run_dir, "outcome.json"))))
@@ -55,7 +61,8 @@ def runs():
 
 
 st.title("Exact vs sampled k=1: 2k vs 4k training questions (hotpot, from RLVR)")
-st.caption("Groups: objective, training questions, and the support floor when it is not the leader's constant 0.053.")
+st.caption("Groups: objective, training questions, and the support floor when it is not the leader's constant 0.053. "
+           "\"cont\": continued from another run's final adapter and Adam state; its steps are drawn after the parent's.")
 sel = runs()
 with st.sidebar:
     xaxis = st.radio("x axis", ["step", "passes over the training questions"])
