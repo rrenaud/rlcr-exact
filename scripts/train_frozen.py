@@ -255,16 +255,32 @@ def adam_fraction(opt):
 
 @torch.no_grad()
 def evaluate(model, rows, values, score, batch, drift_rows=()):
-    """Dev metrics; with drift_rows, also their answer KL (per completion and per token)."""
+    """Dev metrics; with drift_rows, also their answer KL (per completion and per token).
+
+    Support-floor diagnostics, on each row's level distribution p (level marginals renormalized over the list):
+    entropy (nats; ln 11 = 2.40 is uniform), the mean p per level (all / correct / wrong rows), the spread cost
+    (reward of p's top level minus p's expected reward: what the spread gives up), and both terms' ascent gradients
+    in level-logit space, treating p as a softmax over the 11 levels: objective p_l (R_l - sum p R), floor (beta = 1)
+    1/L - p_l. Their norm ratio times beta is what the floor weighs against the objective there; cos < 0 means the
+    floor opposes it. This view ignores the LoRA geometry (the grad events measure that, every --grad-decomp-every)."""
     model.eval()
     greedy, expected, mass, y, y_f1, level_min = [], [], [], [], [], []
+    ent, level_p, spread_cost, g_obj, g_floor, g_cos = [], [], [], [], [], []
     levels = level_matrix(values)
+    grid = torch.linspace(0, 1, levels.shape[0], dtype=values.dtype)
     for part in chunks(rows, batch):
         logps, picks = score(model, [r[1] for r in part], greedy=True)
         for q, k, row in zip(logps.exp().cpu(), picks, part):
             greedy.append(np.nan if k is None else values[k].item())
             mass.append(q.sum().item())
             level_min.append((levels @ q).min().item())
+            p = (levels @ q).clamp_min(1e-12); p = p / p.sum()
+            R = rlcr_reward(grid, torch.tensor(float(row.correct)))
+            go, gf = p * (R - (p * R).sum()), 1 / len(p) - p
+            ent.append(-(p * p.log()).sum().item()); level_p.append(p.float().numpy())
+            spread_cost.append((R[p.argmax()] - (p * R).sum()).item())
+            g_obj.append(go.norm().item()); g_floor.append(gf.norm().item())
+            g_cos.append((go @ gf / (go.norm() * gf.norm()).clamp_min(1e-12)).item())
             expected.append((q * values).sum().item() / max(q.sum().item(), 1e-9))
             y.append(row.correct)
             y_f1.append(row.correct_f1)
@@ -283,9 +299,21 @@ def evaluate(model, rows, values, score, batch, drift_rows=()):
             out |= {f"{name}_brier{suffix}": np.mean((c - labels) ** 2),
                     f"{name}_ece{suffix}": ece(c, labels, centred=name == "expected"),
                     f"{name}_auroc{suffix}": roc_auc_score(labels, c) if len(set(labels)) > 1 else float("nan")}
+    ent, spread_cost, g_obj, g_floor, g_cos, level_p = map(np.array, (ent, spread_cost, g_obj, g_floor, g_cos, level_p))
+    for suffix, m in (("", np.ones(len(y), bool)), ("_correct", y == 1), ("_wrong", y == 0)):
+        if m.any():
+            out |= {f"level_entropy{suffix}": ent[m].mean(), f"spread_cost{suffix}": spread_cost[m].mean(),
+                    f"grad_obj_level{suffix}": np.median(g_obj[m]), f"grad_floor_level{suffix}": np.median(g_floor[m]),
+                    f"grad_ratio_level{suffix}": np.median(g_floor[m] / np.maximum(g_obj[m], 1e-12)),
+                    f"grad_cos_level{suffix}": np.median(g_cos[m])}
+    out |= {"level_entropy_median": np.median(ent)}
     if drift_rows:
         out |= {"answer_kl": np.mean(kls), "answer_kl_max": np.max(kls), "answer_kl_token": sum(kls) / tokens}
-    return {k: round(float(v), 4) for k, v in out.items()}
+    out = {k: round(float(v), 4) for k, v in out.items()}
+    for suffix, m in (("", np.ones(len(y), bool)), ("_correct", y == 1), ("_wrong", y == 0)):
+        if m.any():
+            out[f"level_p{suffix}"] = [round(float(v), 5) for v in level_p[m].mean(0)]
+    return out
 
 
 def main():
