@@ -64,9 +64,19 @@ st.title("Exact vs sampled k=1: 2k vs 4k training questions (hotpot, from RLVR)"
 st.caption("Groups: objective, training questions, and the support floor when it is not the leader's constant 0.053. "
            "\"cont\": continued from another run's final adapter and Adam state; its steps are drawn after the parent's.")
 sel = runs()
+groups = sorted({f"{r['obj']} {r['data']}" for r in sel})
+conts = [g for g in groups if g.endswith(" cont")]
 with st.sidebar:
+    # ?view=cont opens on the continuation runs only (their parent can be added back here)
+    view = st.radio("Runs", ["all", "continuations only", "continuations + parent", "choose"],
+                    index=1 if st.query_params.get("view") == "cont" else 0)
+    if view == "choose":
+        keep = st.multiselect("Groups", groups, default=groups)
+    else:
+        keep = groups if view == "all" else conts + (["exact 4k"] if view == "continuations + parent" else [])
     xaxis = st.radio("x axis", ["step", "passes over the training questions"])
     split_by_seed = st.checkbox("One line per seed (else 2k: mean over seeds with min-max band)", value=False)
+sel = [r for r in sel if f"{r['obj']} {r['data']}" in keep]
 st.caption("Leader config: rlcr11, lr 3.7e-4, W 0.02, F 0.053, 4 questions x 8 rollouts per step. "
            "4k runs: 1,000 steps (one pass); 2k runs: 500 steps (one pass). More data here is also more steps: "
            "compare at equal step for the data effect alone.")
