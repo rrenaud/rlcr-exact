@@ -340,6 +340,8 @@ def main():
     ap.add_argument("--save-every", type=int, default=0,
                     help="also save adapter + optimizer state every N steps, to checkpoints/RUN/stepN")
     ap.add_argument("--eval-every", type=int, default=100)
+    ap.add_argument("--skip-initial-eval", action="store_true",
+                    help="no step-0 dev eval (identical for every run from the same base; saves ~3.5 min on hotpot)")
     ap.add_argument("--dev-limit", type=int, default=None)
     ap.add_argument("--drift-rows", type=int, default=200, help="dev rows for the answer-KL metric (0 = off)")
     ap.add_argument("--answer-kl", type=float, default=1.0, help="W: weight of the answer-KL penalty (0 = off)")
@@ -444,7 +446,8 @@ def main():
             log(event="eval", step=step, split="train", **evaluate_on(train))
         return evaluate(model, dev, values, score, args.eval_batch, drift_rows)
     step = 0
-    log(event="eval", step=0, split="dev", **evaluate_dev())
+    if not args.skip_initial_eval:
+        log(event="eval", step=0, split="dev", **evaluate_dev())
     order, t0, previous_parts = [], time.time(), {}
     trainable = [p for p in model.parameters() if p.requires_grad]
     for step in range(1, args.steps + 1):
