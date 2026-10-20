@@ -726,7 +726,29 @@ verify_open, adapter vs base model under the same prompt (base rollouts shared i
   hyperparameters came from hotpot and the prompt from the dev probe (test unused for selection). The eval-file
   numbers are recomputed here, not checked against the paper's printed table. The earlier RLCR-math 0.204 / 0.705
   was our dev probe, not this test set.
-- Pending: verify_open sampled k=1 and rederive exact / k=1 (queued, each ends with this check).
+
+**All four math pilots** (same config: lr 3.7e-4, W 0.02, floor 0.053, 500 steps, seed 0; runs e678e8eb65,
+cfb04ef0fa, 0add2ee55f, c36c467034). Generation check, adapter side (greedy full rollouts, format-free labels;
+"trainer" = cached-answer greedy readout at step 500):
+
+| prompt, objective | gen dev Brier / ECE / AUROC | gen test Brier / ECE / AUROC | trainer test Brier / AUROC | test acc delta [95%] | answer changed (test) | mean conf |
+|---|---|---|---|---|---|---|
+| verify_open exact | 0.149 / 0.041 / 0.82 | 0.150 / 0.031 / 0.80 | 0.152 / 0.81 | +0.009 [-0.008, +0.026] | 0.17 | 0.72 |
+| verify_open k=1 | 0.174 / 0.136 / 0.81 | 0.181 / 0.133 / 0.79 | 0.177 / 0.79 | +0.010 [-0.008, +0.028] | 0.18 | 0.57 |
+| rederive exact | 0.150 / 0.053 / 0.82 | 0.152 / 0.051 / 0.82 | 0.151 / 0.82 | -0.006 [-0.024, +0.012] | 0.17 | 0.69 |
+| rederive k=1 | 0.170 / 0.024 / 0.74 | 0.172 / 0.040 / 0.72 | 0.176 / 0.72 | +0.018 [-0.002, +0.038] | 0.21 | 0.72 |
+
+- **Exact beats sampled k=1 by ~0.02-0.03 Brier under both prompts**, in different ways: under verify_open k=1 is
+  underconfident (mean 0.57 at accuracy ~0.69, ECE 0.13) with the ranking intact (AUROC 0.79); under rederive k=1
+  is calibrated in the mean (ECE 0.02-0.04) but ranks worse (AUROC 0.72-0.74 vs 0.82). k=1's answer KL is also
+  ~2x exact's (0.89 vs ~0.45 train).
+- **The prompt does not matter after training (exact):** rederive and verify_open land at the same Brier (0.150 /
+  0.152 test) and AUROC (0.80-0.82). The base under rederive is far worse at the start: it stops only 27-33% of the
+  time (67-73% truncated at 4,096; strict accuracy 0.18-0.23), Brier 0.30, AUROC 0.52-0.55. The adapter, trained
+  only on the confidence tokens, stops 97% (strict 0.67-0.70). So the gain over the paper's RLCR is not the
+  verify_open prompt.
+- Every adapter keeps accuracy (all deltas' CIs include 0; flips balanced). The 17-21% answer-changed rate awaits
+  the base-vs-base regeneration (`rlcr-math-pilot/run-20261019T174718Z-3a4f9ef4fb`, running).
 
 ## Next steps (2026-10-17)
 
