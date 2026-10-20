@@ -303,9 +303,6 @@ def main():
                          "scorers, whose rows share the prompt and are packed into one forward; 1 for digit)")
     ap.add_argument("--eval-batch", type=int, default=1, help="rows per no-grad forward (evaluation, sampling)")
     ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--warmup-steps", type=int, default=0, help="linear warmup from 0 to --lr over this many steps")
-    ap.add_argument("--decay-frac", type=float, default=0.0,
-                    help="WSD: linear decay to 0 over this final fraction of --steps (0 = constant after warmup)")
     ap.add_argument("--lora-r", type=int, default=4)
     ap.add_argument("--lora-first-layer", type=int, default=14, help="adapt only layers >= this one (Qwen2.5-7B has 28)")
     ap.add_argument("--problems-per-step", type=int, default=4, help="problems per update (x their rollouts each)")
@@ -355,8 +352,6 @@ def main():
         run_name += "_cont"
     if args.samples_per_row > 1:
         run_name += f"_k{args.samples_per_row}"
-    if args.warmup_steps or args.decay_frac:
-        run_name += f"_wsd{args.warmup_steps}-{args.decay_frac:g}"
     if args.train_problems:
         run_name += f"_overfit{args.train_problems}"
     log_path = os.path.join(args.out, f"train_{run_name}.jsonl")
@@ -401,11 +396,7 @@ def main():
     if args.init_adapter and os.path.exists(opt_path):
         opt.load_state_dict(torch.load(opt_path))
         for g in opt.param_groups:
-            g["lr"] = g["initial_lr"] = args.lr
-    decay_start = args.steps * (1 - args.decay_frac)
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda i: min(  # i = updates done so far
-        (i + 1) / args.warmup_steps if args.warmup_steps else 1.0,
-        (args.steps - i) / (args.steps - decay_start) if args.decay_frac and i >= decay_start else 1.0))
+            g["lr"] = args.lr
     def save(path):  # adapter + Adam state, so a run can be continued (--init-adapter path)
         model.save_pretrained(path)
         torch.save(opt.state_dict(), os.path.join(path, "optimizer.pt"))
@@ -484,7 +475,7 @@ def main():
         if decompose:
             log(event="grad", step=step, **grad_report(parts, previous_parts))
             previous_parts = parts
-        opt.step(); sched.step(); opt.zero_grad(set_to_none=True)
+        opt.step(); opt.zero_grad(set_to_none=True)
         if step % 10 == 0:
             log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, lr=opt.param_groups[0]["lr"], floor_beta=floor_weight(args, step),
                 adam_fraction=adam_fraction(opt), **{k: round(v, 4) for k, v in stats.items()})
