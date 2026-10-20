@@ -747,8 +747,16 @@ cfb04ef0fa, 0add2ee55f, c36c467034). Generation check, adapter side (greedy full
   time (67-73% truncated at 4,096; strict accuracy 0.18-0.23), Brier 0.30, AUROC 0.52-0.55. The adapter, trained
   only on the confidence tokens, stops 97% (strict 0.67-0.70). So the gain over the paper's RLCR is not the
   verify_open prompt.
-- Every adapter keeps accuracy (all deltas' CIs include 0; flips balanced). The 17-21% answer-changed rate awaits
-  the base-vs-base regeneration (`rlcr-math-pilot/run-20261019T174718Z-3a4f9ef4fb`, running).
+- Every adapter keeps accuracy (all deltas' CIs include 0; flips balanced).
+- **Noise floor** (`rlcr-math-pilot/run-20261019T174718Z-3a4f9ef4fb`: the base under verify_open regenerated, no
+  adapter, vs its first generation; greedy both times): answer changed 0.167 dev / 0.166 test, accuracy delta
+  -0.024 [-0.041, -0.007] dev / +0.010 [-0.007, +0.029] test, Brier 0.284 -> 0.305 dev / 0.289 -> 0.278 test.
+  So the adapters' 17-21% answer changes are vLLM batching nondeterminism at the 4,096-token scale (rederive k=1's
+  0.21 is slightly above), and a single greedy regeneration moves accuracy by up to ~0.025 and Brier by ~0.02 on
+  its own: the paired bootstrap CIs above cover question sampling, not this run-to-run noise. Differences among
+  adapters below ~0.02 (e.g. verify_open vs rederive exact) are not resolved; exact vs k=1 (0.02-0.03 Brier, both
+  prompts, matching the trainer's cached-answer readout, which has no generation noise) is at the edge, and
+  the trainer readout gap is the cleaner evidence.
 
 ## Next steps (2026-10-17)
 
