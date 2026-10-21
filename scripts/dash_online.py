@@ -78,6 +78,8 @@ def preselect(names, key):
 def picker(names, key):
     """Multiselect preselected from the URL; the key includes the URL filter, so a new filter is not overridden
     by the widget state of an earlier one."""
+    with st.expander(f"run names ({len(names)}); URL filter {key}={Q.get(key, '') or '(none: all)'}"):
+        st.code("\n".join(names), language=None)
     return st.multiselect("runs", names, default=preselect(names, key), key=f"{key}|{Q.get(key, '')}")
 st.title("On-policy runs (shared-weight vLLM)")
 st.caption(f"{ROOT}; times in run ids are UTC. Running runs are marked *.")
