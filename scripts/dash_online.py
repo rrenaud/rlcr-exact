@@ -25,7 +25,7 @@ st.set_page_config(page_title="On-policy runs", layout="wide")
 @st.cache_data(show_spinner=False)
 def load(path, mtime):  # mtime keys the cache, so a growing log is re-read
     rows = [json.loads(l) for l in open(path) if l.strip()]
-    return {ev: [r for r in rows if r.get("event") == ev] for ev in ("data", "eval", "train", "grad", "refresh")}
+    return {ev: [r for r in rows if r.get("event") == ev] for ev in ("data", "eval", "train", "grad", "refresh", "gen_dev")}
 
 
 def label(a):
@@ -35,6 +35,8 @@ def label(a):
         return f"B1{band} alpha={a.get('answer_pg', 0):g} {conf}"
     n = a.get("refresh_every") or "inf"
     pg = f" alpha={a['answer_pg']:g} {a.get('pg_reward')}" if a.get("answer_pg") else ""
+    if a.get("init_adapter"):  # B2: continued from a Stage A adapter
+        return f"B2 alpha={a.get('answer_pg', 0):g} s{a.get('seed', 0)} {a['steps']}st"
     return f"{'Stage B' if pg else 'Stage A'} N={n}{pg} s{a.get('seed', 0)} {a['steps']}st"
 
 
@@ -102,6 +104,12 @@ def refresh_df(rs):
     return pd.concat(rows) if rows else pd.DataFrame()
 
 
+def refresh_df_raw(rs):
+    rows = [pd.DataFrame(r["refresh"]).assign(run=r["name"] + ("" if r["done"] else " *")) for r in rs if r["refresh"]]
+    rows = [d for d in rows if "em" in d]
+    return pd.concat(rows) if rows else pd.DataFrame(columns=["run", "step", "em"])
+
+
 def line(df, y, title, **kw):
     if df.empty or y not in df:
         return
@@ -117,7 +125,7 @@ def grid(df, specs, cols=2):
 
 
 def full_section():
-    st.header("Full data (2k RLVR train questions, 4 per step x 8 rollouts)")
+    st.header("Full data (4 questions per step x 8 rollouts; B2 = from the Stage A 2k leader, on 2k unseen questions)")
     full = [r for r in R if not r["overfit"]]
     names = [r["name"] for r in full]
     pick = picker(names, "full")
@@ -126,15 +134,37 @@ def full_section():
     st.subheader("Dev, teacher-forced on cached rollouts (does not see answer changes)")
     grid(ev, [("greedy_brier", "dev greedy Brier"), ("greedy_auroc", "dev greedy AUROC"),
               ("expected_brier", "dev expected Brier"), ("answer_kl", "dev answer KL (nats / row)")])
+    gd = pd.DataFrame([dict(g, run=r["name"] + ("" if r["done"] else " *")) for r in full for g in r["gen_dev"]])
+    if not gd.empty:
+        st.subheader("Online dev eval: greedy generation of the dev questions with the current adapter (--gen-dev-every)")
+        grid(gd, [("accuracy", "dev accuracy (RLCR, format-gated)"), ("em", "dev exact match (format ignored)"),
+                  ("brier", "dev stated-confidence Brier"), ("auroc", "dev stated-confidence AUROC"),
+                  ("answer_changed", "answers changed vs base greedy"), ("mean_tokens", "dev mean completion tokens"),
+                  ("format_ok", "dev format ok"), ("conf_parsed", "confidence parsed")])
     st.subheader("Fresh rollouts at each refresh (training questions, current adapter, T 0.7)")
     rf = refresh_df(full)
     grid(rf, [("em", "exact match (format ignored)"), ("accuracy", "RLCR accuracy (format-gated)"),
               ("format_ok", "format ok"), ("mean_tokens", "mean completion tokens"),
               ("mixed_frac", "groups with mixed correctness"), ("truncated", "truncated")])
+    if not rf.empty and rf["run"].nunique() > 1:
+        st.markdown("**Paired difference** (same seed = same questions and sampling seeds, so question difficulty cancels)")
+        ref = st.selectbox("reference run", sorted(rf["run"].unique()), key="paired_ref")
+        raw = refresh_df_raw(full)
+        base = raw[raw.run == ref].set_index("step")["em"]
+        diffs = []
+        for name, g in raw[raw.run != ref].groupby("run"):
+            d = (g.set_index("step")["em"] - base).dropna().rolling(smooth, min_periods=1).mean()
+            diffs.append(pd.DataFrame(dict(step=d.index, em_diff=d.values, run=name)))
+        if diffs:
+            st.plotly_chart(px.line(pd.concat(diffs), x="step", y="em_diff", color="run",
+                                    title=f"fresh-rollout exact match minus {ref}"), use_container_width=True)
     st.subheader("Training stats (every 10 steps)")
     tr = pd.DataFrame([dict(t, run=r["name"]) for r in full for t in r["train"]])
     grid(tr, [("expected_reward", "expected reward (train rows)"), ("answer_kl", "answer KL (train rows)"),
-              ("pg_adv_abs", "mean |advantage| (Stage B)"), ("adam_fraction", "Adam fraction")])
+              ("pg_adv_abs", "mean |advantage| (Stage B)"), ("adam_fraction", "Adam fraction"),
+              ("pg_adv_acc_abs", "mean |advantage|, correctness part"), ("pg_adv_cal_abs", "mean |advantage|, format + calibration part"),
+              ("fresh_expected_brier", "fresh rows' expected Brier, before the update (10-step window)"),
+              ("fresh_auroc", "fresh rows' AUROC, before the update (10-step window)")])
     fin = []
     for r in full:
         row = dict(run=r["name"], done=r["done"])
