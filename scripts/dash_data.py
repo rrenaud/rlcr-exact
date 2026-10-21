@@ -94,9 +94,6 @@ for r in sel:
         rows.append(dict(obj=r["obj"], data=r["data"], seed=r["seed"], step=e["step"],
                          passes=e["step"] * r["ppstep"] / r["n_q"] if r["n_q"] else None, **{m: e.get(m) for m in METRICS}))
 dev = pd.DataFrame(rows)
-st.dataframe(pd.DataFrame([dict(objective=r["obj"], data=r["data"], seed=r["seed"], steps=r["steps"], run=r["run"],
-                                state="done" if r["done"] else "running", gen_check="yes" if r["gen"] else "no") for r in sel]),
-             hide_index=True, use_container_width=True)
 
 if not dev.empty:
     x = "step" if xaxis == "step" else "passes"
