@@ -17,7 +17,12 @@ ROOT = "/data/gpuq-runs/rrenaud/rlcr-hotpot-rlvr-frozen"
 LEADER = dict(scorer="rlcr11", lr=0.00037, answer_kl=0.02)  # any support floor: the default 0.053 is unlabeled in group names
 METRICS = ["greedy_brier", "greedy_auroc", "greedy_ece", "expected_brier", "answer_kl", "greedy_mean"]
 
+if st.query_params.get("page") == "online":  # the on-policy page (dash_online.py) on the same server
+    import runpy
+    runpy.run_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "dash_online.py"))
+    st.stop()
 st.set_page_config(page_title="Exact vs k=1, more data", layout="wide")
+st.sidebar.markdown("[On-policy runs →](?page=online)")
 
 
 @st.cache_data(show_spinner=False)
