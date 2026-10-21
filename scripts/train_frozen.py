@@ -389,6 +389,10 @@ def main():
     ap.add_argument("--train-problems", type=int, default=None,
                     help="overfit check: train on only the first N problems (sorted id) with mixed correctness, "
                          "and also evaluate on their rows (split 'train')")
+    ap.add_argument("--train-band", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                    help="with --train-problems: only problems whose cached accuracy is in [LO, HI] (default: in (0, 1))")
+    ap.add_argument("--conf-weight", type=float, default=1.0,
+                    help="weight of the confidence objective (0 = off: Stage B answer-side checks without it)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--backend", choices=["hf", "vllm"], default="hf",
                     help="vllm: in-process vLLM holds the base weights and the trained model is bound to them (one copy; "
@@ -429,6 +433,10 @@ def main():
         run_name += f"_k{args.samples_per_row}"
     if args.train_problems:
         run_name += f"_overfit{args.train_problems}"
+    if args.conf_weight != 1:
+        run_name += f"_C{args.conf_weight:g}"
+    if args.answer_pg:
+        run_name += f"_pg{args.answer_pg:g}{args.pg_reward[:3]}"
     log_path = os.path.join(args.out, f"train_{run_name}.jsonl")
 
     def log(**rec):
@@ -449,7 +457,8 @@ def main():
         groups[row[0]].append(row)
     group_ids = sorted(groups)
     if args.train_problems:
-        group_ids = [g for g in group_ids if 0 < np.mean([r.correct for r in groups[g]]) < 1][: args.train_problems]
+        lo, hi = args.train_band or (1e-9, 1 - 1e-9)
+        group_ids = [g for g in group_ids if lo <= np.mean([r.correct for r in groups[g]]) <= hi][: args.train_problems]
         train = [r for g in group_ids for r in groups[g]]
     log(event="data", train_rows=len(train), train_problems=len(groups), dropped=dropped, dev_rows=len(dev),
         dev_dropped=dev_dropped, test_rows=len(test) if test else 0, **scorer_info, args=vars(args))
@@ -547,7 +556,10 @@ def main():
             model.train()
             log(event="refresh", step=step, refresh=refreshes, adapter_version=publisher.version if lora else 0,
                 questions=len(qs), groups=len(fresh), rows=sum(map(len, fresh.values())), gen_s=round(gen_s, 1),
-                ref_s=round(time.time() - tr, 1), dropped=dict(dropped_fresh), **rollout_stats(qs))
+                ref_s=round(time.time() - tr, 1), dropped=dict(dropped_fresh), **rollout_stats(qs),
+                per_q={q["id"]: [int(sum(q["correct"])), sum(em_correct(t, q["answer"]) for t in q["outputs"])] for q in qs}
+                if len(qs) <= 16 else None,
+                mixed=sum(0 < sum(q["correct"]) < len(q["correct"]) for q in qs))
         if args.refresh_every:
             batch = [fresh[g] for g in order[: args.problems_per_step] if g in fresh]
         else:
@@ -587,7 +599,7 @@ def main():
                         draws = sample_draws(logps.detach().exp().float(), [row.correct for row in group], values_gpu, args.samples_per_row)
                         baseline = np.mean([r for row_draws in draws for _, r in row_draws])
                     loss = sampled_loss(logps, draws[start: start + len(part)], baseline)
-                terms = [("objective", loss)]
+                terms = [("objective", args.conf_weight * loss)] if args.conf_weight else []
                 if args.answer_pg:
                     assert len(part) == len(group), "--answer-pg needs the whole group in one forward"
                     qid0 = group[0].qid.split("#")[0]
