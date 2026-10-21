@@ -1,5 +1,6 @@
 #!/bin/bash
 # One Stage A run (gpuq payload): [TASK=math|math-rlvr|hotpot|hotpot-rlvr|hotpot-rlvr-stop|hotpot-rlvr-11] run_frozen.sh OBJECTIVE LR SEED [extra train_frozen.py args]
+# PY=<interpreter> overrides the trainer's Python (the vLLM env for --backend vllm).
 # math-rlvr: MATH_C=<math_pilot_prep.sh output dir for one prompt> (pass its --ref-topk MATH_C/ref_topk_train); ends with
 # gen_eval_math.sh under that prompt (base rollouts shared in MATH_C/gen_base)
 export HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_CACHE=/scratch/hf/hub HF_HUB_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -17,7 +18,7 @@ else
   C=/data/gpuq-runs/rrenaud/rlcr-math-cache/run-20261015T212410Z-d16f220bfe; T=math; S=""
 fi
 obj=$1 lr=$2 seed=$3; shift 3
-/home/rrenaud/envs/pytorch/bin/python scripts/train_frozen.py --objective $obj --lr $lr --seed $seed $S \
+${PY:-/home/rrenaud/envs/pytorch/bin/python} scripts/train_frozen.py --objective $obj --lr $lr --seed $seed $S \
   --train $C/rollouts_${T}_fresh_train.jsonl --dev $C/rollouts_${T}_fresh_dev.jsonl --dev-limit 500 \
   --test $C/rollouts_${T}_fresh_test.jsonl "$@" || exit $?
 # Hotpot runs end with a generation check: the adapter on during greedy generation must not hurt accuracy.

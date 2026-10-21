@@ -72,20 +72,26 @@ def load_rows(path, token_bytes, max_prefix, tail_ok=False):
     """
     rows, dropped = [], collections.Counter()
     for line in open(path):
-        q = json.loads(line)
-        for j, (text, ids, ok, correct) in enumerate(zip(q["outputs"], q["completion_ids"], q["format_ok"], q["correct"])):
-            tail_fault = tail_ok and not ok and tail_only_failure(text)
-            cut = cut_point(text, ids, "confidence", token_bytes) if ok or tail_fault else None
-            if cut is None:
-                dropped["format"] += 1; continue
-            if tail_fault:
-                correct = em_correct(text, q["answer"])
-                dropped["kept_tail_fault"] += 1
-            prefix = q["prompt_ids"] + ids[:cut]
-            if len(prefix) > max_prefix:
-                dropped["long"] += 1; continue
-            rows.append(Row(q["id"], prefix, float(correct), len(q["prompt_ids"]), j, f1_correct(text, q["answer"])))
+        rows += question_rows(json.loads(line), token_bytes, max_prefix, tail_ok, dropped)
     return rows, dict(dropped)
+
+
+def question_rows(q, token_bytes, max_prefix, tail_ok, dropped, qid=None):
+    """load_rows for one question's rollouts (a cache line, or a fresh rollout dict from online.Roller)."""
+    rows = []
+    for j, (text, ids, ok, correct) in enumerate(zip(q["outputs"], q["completion_ids"], q["format_ok"], q["correct"])):
+        tail_fault = tail_ok and not ok and tail_only_failure(text)
+        cut = cut_point(text, ids, "confidence", token_bytes) if ok or tail_fault else None
+        if cut is None:
+            dropped["format"] += 1; continue
+        if tail_fault:
+            correct = em_correct(text, q["answer"])
+            dropped["kept_tail_fault"] += 1
+        prefix = q["prompt_ids"] + ids[:cut]
+        if len(prefix) > max_prefix:
+            dropped["long"] += 1; continue
+        rows.append(Row(qid or q["id"], prefix, float(correct), len(q["prompt_ids"]), j, f1_correct(text, q["answer"])))
+    return rows
 
 
 def make_scorer(name, tok):
@@ -366,6 +372,20 @@ def main():
                     help="overfit check: train on only the first N problems (sorted id) with mixed correctness, "
                          "and also evaluate on their rows (split 'train')")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--backend", choices=["hf", "vllm"], default="hf",
+                    help="vllm: in-process vLLM holds the base weights and the trained model is bound to them (one copy; "
+                         "src/rlcr_exact/shared_vllm.py, vLLM env); training is otherwise identical")
+    ap.add_argument("--vllm-kv-gb", type=float, default=2.0, help="vLLM KV-cache size with --backend vllm")
+    ap.add_argument("--vllm-eager", action="store_true", help="no CUDA graphs in vLLM (saves memory, slower generation)")
+    ap.add_argument("--refresh-every", type=int, default=0,
+                    help="N > 0 (needs --backend vllm): every N steps, fresh rollouts of the next N steps' questions from the "
+                         "current adapter (k per question, as the cache: T 0.7, RLCR's tabc labels), and the answer-KL "
+                         "reference from the adapter-off model (top --ref-k). N = 1 is on-policy; 0 trains on the cache")
+    ap.add_argument("--rollouts-per-question", type=int, default=8)
+    ap.add_argument("--gen-temperature", type=float, default=0.7)
+    ap.add_argument("--gen-max-new", type=int, default=1536)
+    ap.add_argument("--ref-k", type=int, default=64)
+    ap.add_argument("--rlcr", default="/home/rrenaud/rlcr_platt/RLCR", help="RLCR checkout (reward_fns) for online grading")
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     args = ap.parse_args()
     packed = args.scorer in ("trie", "hotpot", "hotpot-stop", "rlcr11", "rlcr11-math")
@@ -409,8 +429,17 @@ def main():
     log(event="data", train_rows=len(train), train_problems=len(groups), dropped=dropped, dev_rows=len(dev),
         dev_dropped=dev_dropped, test_rows=len(test) if test else 0, **scorer_info, args=vars(args))
 
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16, attn_implementation="sdpa",
-                                                 device_map={"": 0})
+    llm = None
+    if args.backend == "vllm":
+        from rlcr_exact.shared_vllm import bind_hf, start_vllm
+        llm = start_vllm(args.model, kv_gb=args.vllm_kv_gb, max_model_len=args.max_prefix + 1536,
+                         max_lora_rank=max(8, args.lora_r), seed=args.seed, eager=args.vllm_eager)
+        model = bind_hf(llm, args.model)
+        free, total = torch.cuda.mem_get_info()
+        log(event="backend", backend="vllm", gpu_used_gb=round((total - free) / 2 ** 30, 2))
+    else:
+        model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16, attn_implementation="sdpa",
+                                                     device_map={"": 0})
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     layers = list(range(args.lora_first_layer, model.config.num_hidden_layers))
     if args.init_adapter:
@@ -433,8 +462,18 @@ def main():
     evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch)
     values_gpu = values.cuda()
     levels_gpu = level_matrix(values_gpu)
-    ref_topk = RefTopk(args.ref_topk) if args.ref_topk else None
-    if ref_topk:
+    ref_topk = RefTopk(args.ref_topk) if args.ref_topk and not args.refresh_every else None
+    if args.refresh_every:
+        assert llm is not None, "--refresh-every needs --backend vllm"
+        from rlcr_exact.online import OnlineRefTopk, Roller, load_questions, rollout_stats
+        from rlcr_exact.shared_vllm import AdapterPublisher
+        questions = {q["id"]: q for q in load_questions(args.train) if q["id"] in groups}
+        roller = Roller(llm, args.rlcr, k=args.rollouts_per_question, temperature=args.gen_temperature,
+                        max_new=args.gen_max_new, seed=args.seed)
+        publisher = AdapterPublisher(f"/dev/shm/{os.environ.get('USER', 'u')}_{os.path.basename(args.out.rstrip('/'))}_{run_name}")
+        ref_topk = OnlineRefTopk(args.ref_k) if args.answer_kl else None
+        fresh, refreshes = {}, 0
+    if ref_topk and not args.refresh_every:
         m = ref_topk.meta
         assert (m["rollouts"], m["max_prefix"], m["model"]) == (os.path.abspath(args.train), args.max_prefix, args.model), \
             f"--ref-topk was built for {m['rollouts']} (max_prefix {m['max_prefix']}, {m['model']})"
@@ -453,7 +492,34 @@ def main():
     for step in range(1, args.steps + 1):
         if len(order) < args.problems_per_step:
             order += random.sample(group_ids, len(group_ids))
-        batch = [groups[g] for g in order[: args.problems_per_step]]
+        if args.refresh_every and (step - 1) % args.refresh_every == 0:
+            need = args.refresh_every * args.problems_per_step
+            while len(order) < need:
+                order += random.sample(group_ids, len(group_ids))
+            tg = time.time()
+            lora = publisher.publish(model) if step > 1 or args.init_adapter else None  # a fresh LoRA is the base (B = 0)
+            refreshes += 1
+            qs = roller([questions[g] for g in order[:need]], lora)
+            gen_s = time.time() - tg
+            dropped_fresh = collections.Counter()
+            fresh = {}
+            for q in qs:
+                rows_q = question_rows(q, token_bytes, args.max_prefix, tail_ok, dropped_fresh, qid=f"{q['id']}#r{refreshes}")
+                if rows_q:
+                    fresh[q["id"]] = rows_q
+            tr = time.time()
+            if ref_topk is not None:
+                ref_topk.drop({r.qid for g in fresh.values() for r in g[:1]})
+                for g in fresh.values():
+                    ref_topk.add(model, g)
+            model.train()
+            log(event="refresh", step=step, refresh=refreshes, adapter_version=publisher.version if lora else 0,
+                questions=len(qs), groups=len(fresh), rows=sum(map(len, fresh.values())), gen_s=round(gen_s, 1),
+                ref_s=round(time.time() - tr, 1), dropped=dict(dropped_fresh), **rollout_stats(qs))
+        if args.refresh_every:
+            batch = [fresh[g] for g in order[: args.problems_per_step] if g in fresh]
+        else:
+            batch = [groups[g] for g in order[: args.problems_per_step]]
         del order[: args.problems_per_step]
         n_rows = sum(len(g) for g in batch)
         stats = collections.defaultdict(float)
@@ -517,6 +583,11 @@ def main():
     if test:
         log(event="eval", step=args.steps, split="test", **evaluate_on(test))
     save(os.path.join(args.out, "checkpoints", run_name))
+    if args.refresh_every:
+        publisher.close()
+    if llm is not None:  # in-process vLLM's shutdown can hang holding the GPU
+        sys.stdout.flush()
+        os._exit(0)
 
 
 if __name__ == "__main__":
