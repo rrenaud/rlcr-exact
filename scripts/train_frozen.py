@@ -403,6 +403,10 @@ def main():
                     help="N > 0 (needs --backend vllm): every N steps, fresh rollouts of the next N steps' questions from the "
                          "current adapter (k per question, as the cache: T 0.7, RLCR's tabc labels), and the answer-KL "
                          "reference from the adapter-off model (top --ref-k). N = 1 is on-policy; 0 trains on the cache")
+    ap.add_argument("--gen-dev-every", type=int, default=0,
+                    help="with --backend vllm: greedy generation of the dev questions (--dev-limit) with the current "
+                         "adapter every N steps and at the start (event gen_dev: accuracy, format, length, stated-"
+                         "confidence Brier/AUROC, answers changed vs the cached base greedy rollouts); 0 = off")
     ap.add_argument("--rollouts-per-question", type=int, default=8)
     ap.add_argument("--gen-temperature", type=float, default=0.7)
     ap.add_argument("--gen-max-new", type=int, default=1536)
@@ -497,16 +501,27 @@ def main():
     values_gpu = values.cuda()
     levels_gpu = level_matrix(values_gpu)
     ref_topk = RefTopk(args.ref_topk) if args.ref_topk and not args.refresh_every else None
-    if args.refresh_every:
-        assert llm is not None, "--refresh-every needs --backend vllm"
+    if args.refresh_every or args.gen_dev_every:
+        assert llm is not None, "--refresh-every and --gen-dev-every need --backend vllm"
     assert not args.answer_pg or args.refresh_every, "--answer-pg needs --refresh-every (fresh rollouts)"
-    if args.refresh_every:
-        from rlcr_exact.online import OnlineRefTopk, Roller, load_questions, rollout_stats
+    if args.refresh_every or args.gen_dev_every:
+        from rlcr_exact.online import OnlineRefTopk, Roller, gen_metrics, load_questions, rollout_stats
         from rlcr_exact.shared_vllm import AdapterPublisher
         questions = {q["id"]: q for q in load_questions(args.train) if q["id"] in groups}
         roller = Roller(llm, args.rlcr, k=args.rollouts_per_question, temperature=args.gen_temperature,
                         max_new=args.gen_max_new, seed=args.seed)
         publisher = AdapterPublisher(f"/dev/shm/{os.environ.get('USER', 'u')}_{os.path.basename(args.out.rstrip('/'))}_{run_name}")
+    if args.gen_dev_every:
+        dev_base = [json.loads(l) for l in open(args.dev)][: args.dev_limit]  # the cached base greedy rollouts
+        dev_qs = [dict(id=q["id"], prompt_ids=q["prompt_ids"], answer=q["answer"], source=q.get("source")) for q in dev_base]
+        dev_base = {q["id"]: q for q in dev_base}
+
+        def gen_dev():
+            t = time.time()
+            lora = publisher.publish(model) if step > 0 or args.init_adapter else None
+            m = gen_metrics(roller(dev_qs, lora, greedy=True), dev_base)
+            log(event="gen_dev", step=step, seconds=round(time.time() - t, 1), **m)
+    if args.refresh_every:
         ref_topk = OnlineRefTopk(args.ref_k) if args.answer_kl else None
         fresh, refreshes = {}, 0
     if ref_topk and not args.refresh_every:
@@ -523,7 +538,10 @@ def main():
     step = 0
     if not args.skip_initial_eval:
         log(event="eval", step=0, split="dev", **evaluate_dev())
+    if args.gen_dev_every:
+        gen_dev()
     order, t0, previous_parts = [], time.time(), {}
+    fresh_c, fresh_g, fresh_y = [], [], []  # last 10 steps' fresh rows (expected / argmax confidence, label)
     trainable = [p for p in model.parameters() if p.requires_grad]
     for step in range(1, args.steps + 1):
         if len(order) < args.problems_per_step:
@@ -617,6 +635,10 @@ def main():
                     terms.append(("pg", args.answer_pg * pg * n_rows / max(n_tok, 1)))
                     stats["pg_reward"] += r.sum().item() / n_rows
                     stats["pg_adv_abs"] += adv.abs().sum().item() / n_rows
+                    acc = torch.where(r == 0, 0.0, 0.5 * y)  # the correctness part of the reward; the rest is format + calibration
+                    acc_c = acc - acc.sum() / (len(part) + len(bad_p))
+                    stats["pg_adv_acc_abs"] += acc_c.abs().sum().item() / n_rows
+                    stats["pg_adv_cal_abs"] += (adv - acc_c).abs().sum().item() / n_rows
                     stats["pg_malformed"] += len(bad_p) / n_rows
                 if args.support_floor:
                     floor = support_floor(logps, levels_gpu)
@@ -634,16 +656,28 @@ def main():
                 else:
                     (sum(t for _, t in terms) / n_rows).backward()
                 stats["expected_reward"] += expected.sum().item() / n_rows
+                if args.refresh_every:  # fresh rows, before this step's update: a progressive (held-out) readout
+                    with torch.no_grad():
+                        q_ = logps.exp().float()
+                        fresh_c += ((q_ * values_gpu).sum(-1) / q_.sum(-1).clamp_min(1e-9)).tolist()
+                        fresh_g += values_gpu[logps.argmax(-1)].tolist(); fresh_y += y.tolist()
                 stats["mass"] += logps.exp().sum().item() / n_rows
         if decompose:
             log(event="grad", step=step, **grad_report(parts, previous_parts))
             previous_parts = parts
         opt.step(); opt.zero_grad(set_to_none=True)
         if step % 10 == 0:
+            if args.refresh_every and fresh_y:
+                c_, g_, y_ = map(np.array, (fresh_c, fresh_g, fresh_y))
+                stats |= dict(fresh_expected_brier=np.mean((c_ - y_) ** 2), fresh_argmax_brier=np.mean((g_ - y_) ** 2),
+                              fresh_auroc=roc_auc_score(y_, c_) if 0 < y_.mean() < 1 else float("nan"), fresh_rows=len(y_))
+                fresh_c, fresh_g, fresh_y = [], [], []
             log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, lr=opt.param_groups[0]["lr"], floor_beta=floor_weight(args, step),
                 adam_fraction=adam_fraction(opt), **{k: round(v, 4) for k, v in stats.items()})
         if step % args.eval_every == 0 or step == args.steps:
             log(event="eval", step=step, split="dev", **evaluate_dev())
+        if args.gen_dev_every and (step % args.gen_dev_every == 0 or step == args.steps):
+            gen_dev()
         if args.save_every and step % args.save_every == 0 and step < args.steps:
             save(os.path.join(args.out, "checkpoints", run_name, f"step{step}"))
     if test:

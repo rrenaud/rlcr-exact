@@ -4,7 +4,7 @@ reference computed on the fly instead of read from ref_topk.py's cache.
 
 Rollouts start from the cached questions' own prompt token ids (TokensPrompt), so prompts are identical to the cache.
 """
-import collections, sys
+import collections, re, sys
 
 import numpy as np
 import torch
@@ -34,10 +34,11 @@ class Roller:
         tok = llm.get_tokenizer()
         self.stop = [tok.convert_tokens_to_ids("<|im_end|>")]
 
-    def __call__(self, questions, lora):
+    def __call__(self, questions, lora, greedy=False):
+        """k samples per question at the roller's temperature, or one greedy completion (the online dev eval)."""
         self.calls += 1
-        params = SamplingParams(n=self.k, temperature=self.temperature, top_p=1.0, max_tokens=self.max_new,
-                                seed=self.seed * 100003 + self.calls, stop_token_ids=self.stop)
+        params = SamplingParams(n=1 if greedy else self.k, temperature=0.0 if greedy else self.temperature, top_p=1.0,
+                                max_tokens=self.max_new, seed=self.seed * 100003 + self.calls, stop_token_ids=self.stop)
         res = self.llm.generate([TokensPrompt(prompt_token_ids=q["prompt_ids"]) for q in questions], params,
                                 lora_request=lora, use_tqdm=False)
         out = []
@@ -75,6 +76,45 @@ class OnlineRefTopk:
     def get(self, row, device):
         ids, logp = self.store[(row.qid, row.j)]
         return ids.to(device), logp.to(device)
+
+
+def _last(tag, text):
+    found = re.findall(rf"<{tag}>(.*?)</{tag}>", text, re.S)
+    return found[-1].strip() if found else None
+
+
+def _confidence(text):
+    try:
+        c = float(_last("confidence", text))
+    except (TypeError, ValueError):
+        return None
+    return c if 0 <= c <= 1 else None
+
+
+def gen_metrics(qs, base):
+    """The online dev eval: greedy completions (Roller(..., greedy=True)) graded as gen_eval.py grades them, plus
+    how many final answers differ from the base policy's cached greedy ones (base: id -> cached question).
+    Confidence metrics are over completions whose last <confidence> parses into [0, 1], against RLCR's label."""
+    from sklearn.metrics import roc_auc_score
+    from rlcr_exact.grading import em_correct
+    rows = []
+    for q in qs:
+        t, b = q["outputs"][0], base[q["id"]]
+        rows.append(dict(correct=float(q["correct"][0]), em=em_correct(t, q["answer"]), format_ok=float(q["format_ok"][0]),
+                         truncated=float(q["truncated"][0]), tokens=len(q["completion_ids"][0]), conf=_confidence(t),
+                         changed=float(_last("answer", t) != _last("answer", b["outputs"][0])),
+                         base_correct=float(b["correct"][0])))
+    mean = lambda k: float(np.mean([r[k] for r in rows]))
+    out = {k: mean(k) for k in ("correct", "em", "format_ok", "truncated", "tokens", "changed")}
+    out["accuracy"] = out.pop("correct"); out["mean_tokens"] = out.pop("tokens"); out["answer_changed"] = out.pop("changed")
+    out["right_to_wrong"] = float(np.mean([r["base_correct"] > r["correct"] for r in rows]))
+    out["wrong_to_right"] = float(np.mean([r["base_correct"] < r["correct"] for r in rows]))
+    ok = [r for r in rows if r["conf"] is not None]
+    c, y = np.array([r["conf"] for r in ok]), np.array([r["correct"] for r in ok])
+    out |= dict(conf_parsed=len(ok) / len(rows), mean_conf=float(c.mean()) if len(c) else None,
+                brier=float(np.mean((c - y) ** 2)) if len(c) else None,
+                auroc=float(roc_auc_score(y, c)) if len(c) and 0 < y.mean() < 1 else None)
+    return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in out.items()} | dict(questions=len(rows))
 
 
 def rollout_stats(qs):
