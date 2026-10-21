@@ -226,6 +226,24 @@ def answer_kl(model, states, rows, ref_topk=None):
     return torch.stack(out)
 
 
+def _chunk_logp(lm_head, h, ids):
+    return lm_head(h).float().log_softmax(-1).gather(-1, ids[:, None]).sum()
+
+
+def answer_logp(model, states, prefixes, starts):
+    """[rows] summed log-probs of each row's tokens prefix[start:] (with grad), from the forward's hidden states;
+    chunked and recomputed in backward like the KL."""
+    head = model.get_base_model().lm_head
+    out = []
+    for h_all, p, s in zip(states, prefixes, starts):
+        h, ids = h_all[s - 1: len(p) - 1], torch.tensor(p[s:], device=h_all.device)
+        total = h.new_zeros((), dtype=torch.float32)
+        for c in range(0, len(h), KL_CHUNK):
+            total = total + checkpoint(_chunk_logp, head, h[c: c + KL_CHUNK], ids[c: c + KL_CHUNK], use_reentrant=False)
+        out.append(total)
+    return torch.stack(out)
+
+
 def flat_grad(params):
     return torch.cat([(p.grad if p.grad is not None else torch.zeros_like(p)).detach().flatten().float() for p in params])
 
@@ -386,6 +404,13 @@ def main():
     ap.add_argument("--gen-max-new", type=int, default=1536)
     ap.add_argument("--ref-k", type=int, default=64)
     ap.add_argument("--rlcr", default="/home/rrenaud/rlcr_platt/RLCR", help="RLCR checkout (reward_fns) for online grading")
+    ap.add_argument("--answer-pg", type=float, default=0.0,
+                    help="Stage B (needs --refresh-every): weight alpha of REINFORCE on the answer-side tokens (completion "
+                         "through <confidence>) with group-mean advantages and RLCR's bnpo normalization (summed token "
+                         "terms / answer tokens in the step); malformed rollouts and tail faults get reward 0 (RLCR's rule)")
+    ap.add_argument("--pg-reward", choices=["exact", "accuracy"], default="exact",
+                    help="exact: r = sum_c q(c|a) R(a, c) from the same forward (the confidence integrated out); "
+                         "accuracy: r = RLCR's correctness label (validation: can the answers learn at all)")
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     args = ap.parse_args()
     packed = args.scorer in ("trie", "hotpot", "hotpot-stop", "rlcr11", "rlcr11-math")
@@ -465,6 +490,8 @@ def main():
     ref_topk = RefTopk(args.ref_topk) if args.ref_topk and not args.refresh_every else None
     if args.refresh_every:
         assert llm is not None, "--refresh-every needs --backend vllm"
+    assert not args.answer_pg or args.refresh_every, "--answer-pg needs --refresh-every (fresh rollouts)"
+    if args.refresh_every:
         from rlcr_exact.online import OnlineRefTopk, Roller, load_questions, rollout_stats
         from rlcr_exact.shared_vllm import AdapterPublisher
         questions = {q["id"]: q for q in load_questions(args.train) if q["id"] in groups}
@@ -502,11 +529,16 @@ def main():
             qs = roller([questions[g] for g in order[:need]], lora)
             gen_s = time.time() - tg
             dropped_fresh = collections.Counter()
-            fresh = {}
+            fresh, bad, zero_reward = {}, {}, set()
             for q in qs:
                 rows_q = question_rows(q, token_bytes, args.max_prefix, tail_ok, dropped_fresh, qid=f"{q['id']}#r{refreshes}")
                 if rows_q:
                     fresh[q["id"]] = rows_q
+                    kept = {r.j for r in rows_q}
+                    # Stage B: rollouts without a confidence row (format failures) still get reward 0 in their group
+                    bad[q["id"]] = [(q["prompt_ids"] + ids)[: args.max_prefix] for j, ids in enumerate(q["completion_ids"])
+                                    if j not in kept and ids]
+                    zero_reward |= {(r.qid, r.j) for r in rows_q if not q["format_ok"][r.j]}  # tail faults
             tr = time.time()
             if ref_topk is not None:
                 ref_topk.drop({r.qid for g in fresh.values() for r in g[:1]})
@@ -523,6 +555,10 @@ def main():
         del order[: args.problems_per_step]
         n_rows = sum(len(g) for g in batch)
         stats = collections.defaultdict(float)
+        if args.answer_pg:  # bnpo: the answer-side term is divided by the step's answer tokens (good + malformed rollouts)
+            n_tok = sum(len(r.prefix) - r.start for g in batch for r in g) + \
+                sum(len(p) - len(questions[g[0].qid.split("#")[0]]["prompt_ids"]) for g in batch for p in bad[g[0].qid.split("#")[0]])
+            stats["answer_tokens"] = n_tok / max(len(batch), 1)  # per question
         decompose = args.grad_decomp_every and step % args.grad_decomp_every == 0
         parts = {}
         for group in batch:
@@ -538,7 +574,7 @@ def main():
                 baseline = np.mean([r for row_draws in draws for _, r in row_draws])
             for start in range(0, len(group), micro):
                 part = group[start: start + micro]
-                if args.answer_kl:
+                if args.answer_kl or args.answer_pg:
                     logps, states = score(model, [r[1] for r in part], hidden=True)  # [rows, K], hidden states
                 else:
                     logps = score(model, [r[1] for r in part])
@@ -552,6 +588,24 @@ def main():
                         baseline = np.mean([r for row_draws in draws for _, r in row_draws])
                     loss = sampled_loss(logps, draws[start: start + len(part)], baseline)
                 terms = [("objective", loss)]
+                if args.answer_pg:
+                    assert len(part) == len(group), "--answer-pg needs the whole group in one forward"
+                    qid0 = group[0].qid.split("#")[0]
+                    r = expected.detach() if args.pg_reward == "exact" else y
+                    r = torch.where(torch.tensor([(row.qid, row.j) in zero_reward for row in part], device=r.device), 0.0, r)
+                    bad_p = bad[qid0]
+                    mean_r = r.sum() / (len(part) + len(bad_p))  # group mean over all its rollouts (malformed earn 0)
+                    adv = r - mean_r
+                    lp = answer_logp(model, states, [row.prefix for row in part], [row.start for row in part])
+                    pg = -(adv * lp).sum()
+                    if bad_p:
+                        start_b = len(questions[qid0]["prompt_ids"])
+                        states_b = packed_candidate_logps(model, bad_p, None)
+                        pg = pg + mean_r * answer_logp(model, states_b, bad_p, [start_b] * len(bad_p)).sum()  # adv = -mean_r
+                    terms.append(("pg", args.answer_pg * pg * n_rows / max(n_tok, 1)))
+                    stats["pg_reward"] += r.sum().item() / n_rows
+                    stats["pg_adv_abs"] += adv.abs().sum().item() / n_rows
+                    stats["pg_malformed"] += len(bad_p) / n_rows
                 if args.support_floor:
                     floor = support_floor(logps, levels_gpu)
                     terms.append(("floor", floor_weight(args, step) * floor.sum()))

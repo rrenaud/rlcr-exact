@@ -79,10 +79,12 @@ class OnlineRefTopk:
 
 def rollout_stats(qs):
     """Accuracy, format and truncation of a refresh's rollouts (all outputs)."""
+    from rlcr_exact.grading import em_correct
     c = collections.Counter()
     for q in qs:
+        c["em"] += sum(em_correct(t, q["answer"]) for t in q["outputs"])  # last <answer>, format ignored
         c["outputs"] += len(q["outputs"]); c["correct"] += sum(q["correct"]); c["format_ok"] += sum(q["format_ok"])
         c["truncated"] += sum(q["truncated"]); c["tokens"] += sum(map(len, q["completion_ids"]))
     n = max(c["outputs"], 1)
-    return dict(outputs=c["outputs"], accuracy=round(c["correct"] / n, 4), format_ok=round(c["format_ok"] / n, 4),
+    return dict(outputs=c["outputs"], accuracy=round(c["correct"] / n, 4), em=round(c["em"] / n, 4), format_ok=round(c["format_ok"] / n, 4),
                 truncated=round(c["truncated"] / n, 4), mean_tokens=round(c["tokens"] / n, 1))
