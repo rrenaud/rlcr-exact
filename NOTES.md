@@ -758,6 +758,57 @@ cfb04ef0fa, 0add2ee55f, c36c467034). Generation check, adapter side (greedy full
   prompts, matching the trainer's cached-answer readout, which has no generation noise) is at the edge, and
   the trainer readout gap is the cleaner evidence.
 
+## Support floor ablation and continuation (hotpot, rlcr11 leader config, exact, seed 0; 2026-10-20)
+
+New eval diagnostics (train_frozen.py): level entropy, mean level distribution (all / correct / wrong), spread cost,
+floor vs objective gradients in level-logit space; dashboard `scripts/dash_data.py` (support-floor section; `?view=cont`).
+
+| run (2k questions unless noted) | dev Brier steps 100-500 | test (trainer) | test (generation) |
+|---|---|---|---|
+| constant F 0.053, seeds 0-2 | ~0.21-0.25 ... 0.178-0.182 | 0.202-0.207 | 0.205-0.209 |
+| annealed to 0 from step 300 (`run-20261020T191159Z-95a255fdba`) | 0.211 0.197 0.183 0.181 0.183 | 0.209 | 0.206 |
+| no floor (`run-20261020T191407Z-8d3a33807b`) | 0.220 0.188 **0.258** 0.186 0.195 | 0.219 | 0.220 |
+| 4k parent (step 1000) | | 0.187 | 0.189 |
+| 4k + 500 steps (second pass), F 0 (`run-20261020T191404Z-53015021a2`) | 0.196 0.173 0.170 0.175 0.178 | 0.208 | 0.213 |
+| 4k + 500 steps (second pass), F 0.053 (`run-20261020T191404Z-e297879bd0`) | 0.172 0.178 0.173 0.176 0.172 | 0.213 | 0.209 |
+
+- **With the floor on, each row's level distribution is near uniform** (entropy 2.0-2.2 nats of 2.40 from step 100;
+  3-13% on every level); the greedy readout works because its argmax level is right. Step 0 is one-hot-ish (58% on
+  1.0, 32% on 0.9). Level-space floor/objective pull ~9x at step 0; LoRA-space cosine -0.8 to -0.9 from step 200.
+- **Annealing it off late changes nothing greedy** (entropy 2.15 -> 1.20, expected readout catches up with greedy).
+- **No floor from the start does not collapse but is worse:** levels that start empty (0.0, 0.1, 1.0) never get mass
+  (the exact gradient is proportional to q), so the scale compresses to 0.2-0.9 (mass on 0.5 and 0.8); unstable
+  (0.258 at step 300); answer KL 0.35 vs ~0.2; test -0.012 to -0.015. Keep a constant floor.
+- **A second pass over the 4k rollouts polarizes the stated confidence with or without the floor** (60-67% of
+  generated test confidences at 0.1 / 0.9, vs 13% for the parent) and costs ~0.02 test Brier while dev gains ~0.01.
+  The floor's only effects there: row entropy stays high (2.03 vs 0.26) and answer KL ~half. Data, not the floor, is
+  the limit: one pass over 4k questions was the best point; the fresh-train pool (4,000) is used up.
+
+## Fast iteration (2026-10-20)
+
+40 finished hotpot runs: median share of the dev-Brier gain by step 100/200/300/400 = 86/94/99/101%. Across all runs
+step-200 dev rank predicts the final rank (Spearman 0.71), so a short run rejects bad configs; among the top 20
+(dev 0.179-0.196) step-200 vs final rank is -0.1 and final dev vs test 0.14: good configs are not separable at one
+eval (sd ~0.01) or one seed (~0.005). Trainer test tracks generation test (Spearman 0.88, mean |diff| 0.017). A
+500-step run is ~80 min: 45 train, 21 for six dev evals (3.5 each), 7.5 gen check, ~6 load + test.
+Screening tier: `scripts/screen_frozen.sh` (200 steps, one eval, `--skip-initial-eval`, no gen check, ~25 min).
+
+## Shared-weight vLLM + LoRA trainer prototype (2026-10-20)
+
+`scripts/shared_vllm_proto.py` (vLLM env, `rlcr-shared-vllm/run-20261021T000744Z-ceaf8dbc95`): vLLM 0.31 in-process
+(`VLLM_ENABLE_V1_MULTIPROCESSING=0`, KV cache fixed at 3 GB); an HF Qwen2 built on meta with every frozen parameter
+a view of vLLM's tensors (q/k/v rows of qkv_proj, gate/up rows of gate_up_proj; bind `.data`, vLLM's Parameter
+subclass cannot be re-wrapped), plus the PEFT LoRA (r 4, layers 14-27). One copy of the weights:
+- binding + LoRA adds 0.019 GB; checked tensors bit-identical to the checkpoint; vLLM in-process uses 19.1 GB.
+- HF path vs vLLM log-probs on a 1,946-token rollout: mean |diff| 0.03/token, completion sum -89.73 vs -89.97.
+- 5 Adam steps toward a target string, adapter saved to /dev/shm (0.14 s) and passed as a new LoRARequest: vLLM
+  log-prob of the target -39.5 -> -0.026 (HF -0.024); first use 0.23 s.
+- Cycle (upper bounds: the broken test adapter ran every rollout to the 512-token cap): 32 rollouts 11 s, 256
+  rollouts 40 s; unpacked forward/backward over 32 full rows 28 s (train_frozen's packed scoring does a 32-row step
+  in ~5.4 s). Peak 21.0 GB allocated / 23.0 GB used of 24.5: fits for hotpot, tight; math would need less KV or
+  freeing it while training.
+- The reference for the answer KL can be the same model with the adapter disabled (no separate cache needed).
+
 ## Next steps (2026-10-17)
 
 In the queue (gpuq, `rlcr-hotpot-rlvr-*`):
