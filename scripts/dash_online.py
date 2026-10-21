@@ -6,8 +6,9 @@ and length), and B1 overfit runs (8 questions, every refresh's rollouts are the 
 the per-term gradient norms). Refresh curves are smoothed with a rolling mean (sidebar).
 Served by dash_data.py at ?page=online (port 8502), or alone. URL params for the initial selection:
   show=full|b1        one section only (default both)
-  full=a,b / b1=a,b   preselect runs whose name contains any of the comma-separated substrings (default all),
-                      e.g. full=N=1 s0,Stage B   b1=band
+  full=a,b / b1=a,b   preselect runs matching any comma-separated term; a term matches when each of its words is a
+                      word of the run name (case-insensitive) or part of the run id (default all),
+                      e.g. full=N=1 s0,stage b   b1=alpha=10,alpha=0   b1=conf off
   smooth=N            rolling mean over refreshes (default 10)
 usage: ~/envs/dash/bin/streamlit run scripts/dash_data.py --server.address 127.0.0.1 --server.port 8502
 """
@@ -31,9 +32,9 @@ def label(a):
     if a.get("train_problems"):
         conf = "conf off" if a.get("conf_weight", 1) == 0 else "conf on" + (" +floor" if a.get("support_floor") else "")
         band = " band" if a.get("train_band") else ""
-        return f"B1{band}: α={a.get('answer_pg', 0):g} {conf}"
-    n = a.get("refresh_every") or "∞"
-    pg = f" α={a['answer_pg']:g} {a.get('pg_reward')}" if a.get("answer_pg") else ""
+        return f"B1{band} alpha={a.get('answer_pg', 0):g} {conf}"
+    n = a.get("refresh_every") or "inf"
+    pg = f" alpha={a['answer_pg']:g} {a.get('pg_reward')}" if a.get("answer_pg") else ""
     return f"{'Stage B' if pg else 'Stage A'} N={n}{pg} s{a.get('seed', 0)} {a['steps']}st"
 
 
@@ -63,9 +64,23 @@ st.sidebar.markdown("[← Exact vs k=1, more data](?)")
 show = Q.get("show", "full,b1").split(",")
 
 
+def matches(name, term):
+    """Every space-separated word of the term is one of the name's words (case-insensitive), or part of its run id."""
+    words = {w.strip("[]+").lower() for w in name.split()}
+    return all(t.lower() in words or t.lower() in name.split("[")[-1] for t in term.split())
+
+
 def preselect(names, key):
-    subs = [x for x in Q.get(key, "").split(",") if x]
-    return [n for n in names if any(x in n for x in subs)] if subs else names
+    terms = [x for x in Q.get(key, "").split(",") if x.strip()]
+    return [n for n in names if any(matches(n, t) for t in terms)] if terms else names
+
+
+def picker(names, key):
+    """Multiselect preselected from the URL; the key includes the URL filter, so a new filter is not overridden
+    by the widget state of an earlier one."""
+    with st.expander(f"run names ({len(names)}); URL filter {key}={Q.get(key, '') or '(none: all)'}"):
+        st.code("\n".join(names), language=None)
+    return st.multiselect("runs", names, default=preselect(names, key), key=f"{key}|{Q.get(key, '')}")
 st.title("On-policy runs (shared-weight vLLM)")
 st.caption(f"{ROOT}; times in run ids are UTC. Running runs are marked *.")
 
@@ -105,7 +120,7 @@ def full_section():
     st.header("Full data (2k RLVR train questions, 4 per step x 8 rollouts)")
     full = [r for r in R if not r["overfit"]]
     names = [r["name"] for r in full]
-    pick = st.multiselect("runs", names, default=preselect(names, "full"), key="full")
+    pick = picker(names, "full")
     full = [r for r in full if r["name"] in pick]
     ev = pd.DataFrame([dict(e, run=r["name"] + ("" if r["done"] else " *")) for r in full for e in r["eval"] if e["split"] == "dev"])
     st.subheader("Dev, teacher-forced on cached rollouts (does not see answer changes)")
@@ -136,7 +151,7 @@ def b1_section():
     st.header("B1: overfit 8 questions (all 8 every step, accuracy reward, 60 steps)")
     b1 = [r for r in R if r["overfit"]]
     names = [r["name"] for r in b1]
-    pick = st.multiselect("runs", names, default=preselect(names, "b1"), key="b1")
+    pick = picker(names, "b1")
     b1 = [r for r in b1 if r["name"] in pick]
     rb = refresh_df(b1)
     grid(rb, [("em", "exact match on the 8 (format ignored)"), ("accuracy", "RLCR accuracy (format-gated)"),
