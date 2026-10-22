@@ -733,7 +733,7 @@ def main():
                               fresh_argmax_mean_correct=g_[y_ == 1].mean() if both else float("nan"),
                               fresh_argmax_mean_wrong=g_[y_ == 0].mean() if both else float("nan"))
                 p_ = np.array(fresh_p)
-                levels_log = {f"fresh_level_p{sfx}": [round(float(v), 5) for v in p_[m].mean(0)]
+                levels_log |= {f"fresh_level_p{sfx}": [round(float(v), 5) for v in p_[m].mean(0)]
                               for sfx, m in (("", np.ones(len(y_), bool)), ("_correct", y_ == 1), ("_wrong", y_ == 0)) if m.any()}
                 fresh_c, fresh_g, fresh_y, fresh_p = [], [], [], []
             log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, lr=opt.param_groups[0]["lr"], floor_beta=floor_weight(args, step),
