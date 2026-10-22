@@ -546,7 +546,9 @@ def main():
     if args.gen_dev_every:
         gen_dev()
     order, t0, previous_parts = [], time.time(), {}
-    fresh_c, fresh_g, fresh_y = [], [], []  # last 10 steps' fresh rows (expected / argmax confidence, label)
+    # Progressive readout: the last 10 steps' rows scored before their update (expected / argmax confidence, label).
+    # Held out: fresh rollouts, or cached questions on their first pass (seen = questions already trained on).
+    fresh_c, fresh_g, fresh_y, fresh_p, seen = [], [], [], [], set()  # fresh_p: level marginals, as evaluate's level_p
     trainable = [p for p in model.parameters() if p.requires_grad]
     for step in range(1, args.steps + 1):
         if len(order) < args.problems_per_step:
@@ -597,6 +599,8 @@ def main():
         decompose = args.grad_decomp_every and step % args.grad_decomp_every == 0
         parts = {}
         for group in batch:
+            unseen = bool(args.refresh_every) or group[0].qid.split("#")[0] not in seen
+            seen.add(group[0].qid.split("#")[0])
             micro = args.micro_batch or (len(group) if packed else 1)
             # Sampled: every row's draws are needed for the group baseline before any backward. With the group in
             # one forward (packed), draw from that forward's own q; split into parts, draw first in a no-grad pass.
@@ -663,24 +667,36 @@ def main():
                 else:
                     (sum(t for _, t in terms) / n_rows).backward()
                 stats["expected_reward"] += expected.sum().item() / n_rows
-                if args.refresh_every:  # fresh rows, before this step's update: a progressive (held-out) readout
+                if unseen:  # rows not trained on yet, before this step's update: a progressive (held-out) readout
                     with torch.no_grad():
                         q_ = logps.exp().float()
                         fresh_c += ((q_ * values_gpu).sum(-1) / q_.sum(-1).clamp_min(1e-9)).tolist()
                         fresh_g += values_gpu[logps.argmax(-1)].tolist(); fresh_y += y.tolist()
+                        lp_ = (q_ @ levels_gpu.T.float()).clamp_min(1e-12); fresh_p += (lp_ / lp_.sum(-1, keepdim=True)).tolist()
                 stats["mass"] += logps.exp().sum().item() / n_rows
         if decompose:
             log(event="grad", step=step, **grad_report(parts, previous_parts))
             previous_parts = parts
         opt.step(); opt.zero_grad(set_to_none=True)
         if step % 10 == 0:
-            if args.refresh_every and fresh_y:
+            levels_log = {}
+            if fresh_y:
                 c_, g_, y_ = map(np.array, (fresh_c, fresh_g, fresh_y))
+                both = 0 < y_.mean() < 1
                 stats |= dict(fresh_expected_brier=np.mean((c_ - y_) ** 2), fresh_argmax_brier=np.mean((g_ - y_) ** 2),
-                              fresh_auroc=roc_auc_score(y_, c_) if 0 < y_.mean() < 1 else float("nan"), fresh_rows=len(y_))
-                fresh_c, fresh_g, fresh_y = [], [], []
+                              fresh_auroc=roc_auc_score(y_, c_) if both else float("nan"),
+                              fresh_argmax_auroc=roc_auc_score(y_, g_) if both else float("nan"), fresh_rows=len(y_),
+                              fresh_accuracy=y_.mean(), fresh_expected_mean=c_.mean(), fresh_argmax_mean=g_.mean(),
+                              fresh_expected_mean_correct=c_[y_ == 1].mean() if both else float("nan"),
+                              fresh_expected_mean_wrong=c_[y_ == 0].mean() if both else float("nan"),
+                              fresh_argmax_mean_correct=g_[y_ == 1].mean() if both else float("nan"),
+                              fresh_argmax_mean_wrong=g_[y_ == 0].mean() if both else float("nan"))
+                p_ = np.array(fresh_p)
+                levels_log = {f"fresh_level_p{sfx}": [round(float(v), 5) for v in p_[m].mean(0)]
+                              for sfx, m in (("", np.ones(len(y_), bool)), ("_correct", y_ == 1), ("_wrong", y_ == 0)) if m.any()}
+                fresh_c, fresh_g, fresh_y, fresh_p = [], [], [], []
             log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, lr=opt.param_groups[0]["lr"], floor_beta=floor_weight(args, step),
-                adam_fraction=adam_fraction(opt), **{k: round(v, 4) for k, v in stats.items()})
+                adam_fraction=adam_fraction(opt), **{k: round(v, 4) for k, v in stats.items()}, **levels_log)
         if step % args.eval_every == 0 or step == args.steps:
             log(event="eval", step=step, split="dev", **evaluate_dev())
         if args.gen_dev_every and (step % args.gen_dev_every == 0 or step == args.steps):
