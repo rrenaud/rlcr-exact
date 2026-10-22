@@ -416,6 +416,11 @@ def main():
                     help="Stage B (needs --refresh-every): weight alpha of REINFORCE on the answer-side tokens (completion "
                          "through <confidence>) with group-mean advantages and RLCR's bnpo normalization (summed token "
                          "terms / answer tokens in the step); malformed rollouts and tail faults get reward 0 (RLCR's rule)")
+    ap.add_argument("--pg-balance", choices=["fixed", "rlcr"], default="fixed",
+                    help="fixed: the answer term is --answer-pg x (its token-mean); rlcr: both terms are averaged over the "
+                         "step's rollouts, which is RLCR's answer:confidence balance in expectation (its token-level "
+                         "loss with the confidence tokens' REINFORCE replaced by the exact gradient); --answer-pg is then "
+                         "1/kappa, the inverse confidence boost over RLCR (1 = RLCR). Logged as alpha_eff in fixed units")
     ap.add_argument("--pg-reward", choices=["exact", "accuracy"], default="exact",
                     help="exact: r = sum_c q(c|a) R(a, c) from the same forward (the confidence integrated out); "
                          "accuracy: r = RLCR's correctness label (validation: can the answers learn at all)")
@@ -440,7 +445,7 @@ def main():
     if args.conf_weight != 1:
         run_name += f"_C{args.conf_weight:g}"
     if args.answer_pg:
-        run_name += f"_pg{args.answer_pg:g}{args.pg_reward[:3]}"
+        run_name += f"_pg{args.answer_pg:g}{args.pg_reward[:3]}" + ("_bRLCR" if args.pg_balance == "rlcr" else "")
     log_path = os.path.join(args.out, f"train_{run_name}.jsonl")
 
     def log(**rec):
@@ -632,7 +637,9 @@ def main():
                         start_b = len(questions[qid0]["prompt_ids"])
                         states_b = packed_candidate_logps(model, bad_p, None)
                         pg = pg + mean_r * answer_logp(model, states_b, bad_p, [start_b] * len(bad_p)).sum()  # adv = -mean_r
-                    terms.append(("pg", args.answer_pg * pg * n_rows / max(n_tok, 1)))
+                    scale = 1.0 if args.pg_balance == "rlcr" else n_rows / max(n_tok, 1)
+                    terms.append(("pg", args.answer_pg * pg * scale))
+                    stats["alpha_eff"] = args.answer_pg * (n_tok / n_rows if args.pg_balance == "rlcr" else 1.0)
                     stats["pg_reward"] += r.sum().item() / n_rows
                     stats["pg_adv_abs"] += adv.abs().sum().item() / n_rows
                     acc = torch.where(r == 0, 0.0, 0.5 * y)  # the correctness part of the reward; the rest is format + calibration
