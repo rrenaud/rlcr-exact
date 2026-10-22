@@ -340,6 +340,30 @@ def evaluate(model, rows, values, score, batch, drift_rows=()):
     return out
 
 
+def reward_snr(q, values, y, zero, n_bad):
+    """One group's reward signal and confidence-sampling noise, by component. Per rollout, the exact reward
+    r = sum_c q(c) R(c) splits into format (0.5), correctness (0.5 y) and calibration (the rest: the Brier term and
+    the unlisted mass's loss, everything that depends on c); malformed rollouts and tail faults are 0 in all three.
+    Signal = each component's variance across the group's rollouts (what the advantage r - mean sees); noise = the
+    mean over rollouts of Var_q[R], the variance a sampled c (RLCR, k = 1) adds to each rollout's reward. cal_within:
+    the calibration component's pooled variance within rollouts of the same correctness. All variances divide by the
+    group's rollout count, so they add up (with covariances) to the advantage's variance."""
+    R = rlcr_reward(values, y[:, None]).float()
+    e = (q * R).sum(-1)
+    keep = ~zero
+    comps = {"format": torch.where(keep, 0.5, 0.0), "correct": torch.where(keep, 0.5 * y, 0.0),
+             "cal": torch.where(keep, e - 0.5 - 0.5 * y, 0.0)}
+    comps["total"] = comps["format"] + comps["correct"] + comps["cal"]
+    noise = torch.where(keep, (q * R ** 2).sum(-1) - e ** 2, 0.0)
+    pad = torch.zeros(n_bad, device=q.device)
+    n = len(y) + n_bad
+    out = {k: torch.cat([v, pad]).var(unbiased=False).item() for k, v in comps.items()}
+    within = sum(((comps["cal"][keep & (y == v)] - comps["cal"][keep & (y == v)].mean()) ** 2).sum().item()
+                 for v in (0.0, 1.0) if (keep & (y == v)).any())
+    out |= {"cal_within": within / n, "noise": noise.sum().item() / n}
+    return out, bool((y[keep] == 1).any() and (y[keep] == 0).any())
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None, help="default: the released checkpoint for the scorer's task")
@@ -548,7 +572,8 @@ def main():
     order, t0, previous_parts = [], time.time(), {}
     # Progressive readout: the last 10 steps' rows scored before their update (expected / argmax confidence, label).
     # Held out: fresh rollouts, or cached questions on their first pass (seen = questions already trained on).
-    fresh_c, fresh_g, fresh_y, fresh_p, seen = [], [], [], [], set()  # fresh_p: level marginals, as evaluate's level_p
+    fresh_c, fresh_g, fresh_y, fresh_p, seen = [], [], [], [], set()
+    snr = collections.defaultdict(float)  # reward_snr sums over the last 10 steps' groups (all / mixed / uniform)  # fresh_p: level marginals, as evaluate's level_p
     trainable = [p for p in model.parameters() if p.requires_grad]
     for step in range(1, args.steps + 1):
         if len(order) < args.problems_per_step:
@@ -651,6 +676,13 @@ def main():
                     stats["pg_adv_acc_abs"] += acc_c.abs().sum().item() / n_rows
                     stats["pg_adv_cal_abs"] += (adv - acc_c).abs().sum().item() / n_rows
                     stats["pg_malformed"] += len(bad_p) / n_rows
+                    with torch.no_grad():
+                        zero = torch.tensor([(row.qid, row.j) in zero_reward for row in part], device=y.device)
+                        parts_snr, mixed = reward_snr(logps.exp().float(), values_gpu.float(), y.float(), zero, len(bad_p))
+                        for kind in ("all", "mixed" if mixed else "uniform"):
+                            snr[f"{kind}_groups"] += 1
+                            for k, v in parts_snr.items():
+                                snr[f"{kind}_{k}"] += v
                 if args.support_floor:
                     floor = support_floor(logps, levels_gpu)
                     terms.append(("floor", floor_weight(args, step) * floor.sum()))
@@ -680,6 +712,15 @@ def main():
         opt.step(); opt.zero_grad(set_to_none=True)
         if step % 10 == 0:
             levels_log = {}
+            for kind in ("all", "mixed", "uniform"):  # SNR = component signal variance / confidence-sampling noise
+                if snr[f"{kind}_groups"]:
+                    sfx = "" if kind == "all" else f"_{kind}"
+                    levels_log[f"snr_groups{sfx}"] = int(snr[f"{kind}_groups"])
+                    levels_log[f"snr_noise_var{sfx}"] = round(snr[f"{kind}_noise"] / snr[f"{kind}_groups"], 5)
+                    for k in ("total", "format", "correct", "cal", "cal_within"):
+                        levels_log[f"snr_{k}{sfx}"] = round(snr[f"{kind}_{k}"] / max(snr[f"{kind}_noise"], 1e-12), 4)
+                        levels_log[f"snr_sig_{k}{sfx}"] = round(snr[f"{kind}_{k}"] / snr[f"{kind}_groups"], 5)
+            snr.clear()
             if fresh_y:
                 c_, g_, y_ = map(np.array, (fresh_c, fresh_g, fresh_y))
                 both = 0 < y_.mean() < 1
