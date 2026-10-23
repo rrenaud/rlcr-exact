@@ -142,6 +142,13 @@ def sample_draws(qs, correct, values, k):
     return out
 
 
+def rlcr_draws(draws, group, zero_reward, n_bad):
+    """RLCR's k = 1 reward: a tail fault earns 0 for its drawn confidence too, and the group baseline is the mean over
+    all the question's rollouts (malformed ones earn 0), the same baseline the answer term uses."""
+    draws = [[(j, 0.0 if (row.qid, row.j) in zero_reward else rew) for j, rew in d] for row, d in zip(group, draws)]
+    return draws, sum(rew for d in draws for _, rew in d) / (len(group) + n_bad)
+
+
 def sampled_loss(logps, draws, baseline):
     """GRPO loss on the confidence: -(1/k) sum_draws (reward - baseline) log q_j per row, summed over rows."""
     loss = 0
@@ -445,9 +452,12 @@ def main():
                          "step's rollouts, which is RLCR's answer:confidence balance in expectation (its token-level "
                          "loss with the confidence tokens' REINFORCE replaced by the exact gradient); --answer-pg is then "
                          "1/kappa, the inverse confidence boost over RLCR (1 = RLCR). Logged as alpha_eff in fixed units")
-    ap.add_argument("--pg-reward", choices=["exact", "accuracy"], default="exact",
+    ap.add_argument("--pg-reward", choices=["exact", "accuracy", "sampled"], default="exact",
                     help="exact: r = sum_c q(c|a) R(a, c) from the same forward (the confidence integrated out); "
-                         "accuracy: r = RLCR's correctness label (validation: can the answers learn at all)")
+                         "accuracy: r = RLCR's correctness label (validation: can the answers learn at all); "
+                         "sampled: RLCR (k = 1) — r = R(a, c) of the confidence drawn for the sampled objective, one "
+                         "advantage per rollout for answer and confidence alike (needs --objective sampled; tail faults "
+                         "and malformed rollouts earn 0, and both terms share the group baseline over all rollouts)")
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     ap.add_argument("--no-log-q", action="store_true",
                     help="skip q_<run>.jsonl.gz: every training rollout's confidence distribution over the 11 levels at each step (before the update), with its label, expected reward and Var_q[R]")
@@ -457,6 +467,8 @@ def main():
                                 else "mehuldamani/big-math-digits-v2-correctness" if args.scorer == "rlcr11-math"
                                 else "mehuldamani/big-math-digits-v2-brier-base-tabc")
     random.seed(args.seed); torch.manual_seed(args.seed)
+    assert args.pg_reward != "sampled" or (args.objective == "sampled" and args.samples_per_row == 1 and args.answer_pg), \
+        "--pg-reward sampled is RLCR's k = 1 arm: --objective sampled, --samples-per-row 1, --answer-pg"
     run_name = f"{args.scorer}_{args.objective}_lr{args.lr:g}_W{args.answer_kl:g}_s{args.seed}"
     if args.support_floor:
         run_name += f"_F{args.support_floor:g}"
@@ -640,6 +652,8 @@ def main():
                                     for part in chunks(group, len(group) if packed else args.eval_batch)])
                 draws = sample_draws(qs, [row.correct for row in group], values_gpu, args.samples_per_row)
                 baseline = np.mean([r for row_draws in draws for _, r in row_draws])
+                if args.pg_reward == "sampled":
+                    draws, baseline = rlcr_draws(draws, group, zero_reward, len(bad[group[0].qid.split("#")[0]]))
             for start in range(0, len(group), micro):
                 part = group[start: start + micro]
                 if args.answer_kl or args.answer_pg:
@@ -661,12 +675,15 @@ def main():
                     if not prepass:  # the whole group is this part
                         draws = sample_draws(logps.detach().exp().float(), [row.correct for row in group], values_gpu, args.samples_per_row)
                         baseline = np.mean([r for row_draws in draws for _, r in row_draws])
+                        if args.pg_reward == "sampled":
+                            draws, baseline = rlcr_draws(draws, group, zero_reward, len(bad[group[0].qid.split("#")[0]]))
                     loss = sampled_loss(logps, draws[start: start + len(part)], baseline)
                 terms = [("objective", args.conf_weight * loss)] if args.conf_weight else []
                 if args.answer_pg:
                     assert len(part) == len(group), "--answer-pg needs the whole group in one forward"
                     qid0 = group[0].qid.split("#")[0]
-                    r = expected.detach() if args.pg_reward == "exact" else y
+                    r = expected.detach() if args.pg_reward == "exact" else y if args.pg_reward == "accuracy" else \
+                        torch.tensor([d[0][1] for d in draws[start: start + len(part)]], device=y.device, dtype=expected.dtype)
                     r = torch.where(torch.tensor([(row.qid, row.j) in zero_reward for row in part], device=r.device), 0.0, r)
                     bad_p = bad[qid0]
                     mean_r = r.sum() / (len(part) + len(bad_p))  # group mean over all its rollouts (malformed earn 0)
