@@ -33,7 +33,7 @@ the only signal that regenerated answers would change.
 usage: train_frozen.py --train ROLLOUTS --dev ROLLOUTS [--test ROLLOUTS] --objective exact|sampled
                        [--scorer digit|trie] ...
 """
-import argparse, collections, json, math, os, random, sys, time
+import argparse, collections, gzip, json, math, os, random, sys, time
 
 import numpy as np
 import torch
@@ -449,6 +449,8 @@ def main():
                     help="exact: r = sum_c q(c|a) R(a, c) from the same forward (the confidence integrated out); "
                          "accuracy: r = RLCR's correctness label (validation: can the answers learn at all)")
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
+    ap.add_argument("--no-log-q", action="store_true",
+                    help="skip q_<run>.jsonl.gz: every training rollout's confidence distribution over the 11 levels at each step (before the update), with its label, expected reward and Var_q[R]")
     args = ap.parse_args()
     packed = args.scorer in ("trie", "hotpot", "hotpot-stop", "rlcr11", "rlcr11-math")
     args.model = args.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if args.scorer.startswith("hotpot") or args.scorer == "rlcr11"
@@ -574,6 +576,8 @@ def main():
     # Held out: fresh rollouts, or cached questions on their first pass (seen = questions already trained on).
     fresh_c, fresh_g, fresh_y, fresh_p, seen = [], [], [], [], set()
     snr = collections.defaultdict(float)  # reward_snr sums over the last 10 steps' groups (all / mixed / uniform)  # fresh_p: level marginals, as evaluate's level_p
+    zero_reward = set()  # tail-fault rows (format fails only after the confidence); refreshed runs rebind it per refresh
+    qlog = None if args.no_log_q else gzip.open(os.path.join(args.out, f"q_{run_name}.jsonl.gz"), "at")
     trainable = [p for p in model.parameters() if p.requires_grad]
     for step in range(1, args.steps + 1):
         if len(order) < args.problems_per_step:
@@ -644,6 +648,13 @@ def main():
                     logps = score(model, [r[1] for r in part])
                 y = torch.tensor([r[2] for r in part], device=logps.device)
                 expected = exact_objective(logps, values_gpu, y[:, None])  # [rows]
+                if qlog is not None:  # every rollout's q over the levels, before this step's update
+                    with torch.no_grad():
+                        q_ = logps.detach().exp().float(); R_ = rlcr_reward(values_gpu.float(), y[:, None].float())
+                        e_ = (q_ * R_).sum(-1); v_ = (q_ * R_ ** 2).sum(-1) - e_ ** 2; lp_ = q_ @ levels_gpu.T.float()
+                        for row, p_, m_, e1, v1 in zip(part, lp_.tolist(), q_.sum(-1).tolist(), e_.tolist(), v_.tolist()):
+                            qlog.write(json.dumps(dict(step=step, qid=row.qid, j=row.j, y=row[2], tail_fault=(row.qid, row.j) in zero_reward,
+                                                       p=[round(x, 5) for x in p_], mass=round(m_, 5), r=round(e1, 5), var_q=round(v1, 6))) + "\n")
                 if args.objective == "exact":
                     loss = -expected.sum()
                 else:
@@ -721,6 +732,8 @@ def main():
                         levels_log[f"snr_{k}{sfx}"] = round(snr[f"{kind}_{k}"] / max(snr[f"{kind}_noise"], 1e-12), 4)
                         levels_log[f"snr_sig_{k}{sfx}"] = round(snr[f"{kind}_{k}"] / snr[f"{kind}_groups"], 5)
             snr.clear()
+            if qlog is not None:
+                qlog.flush()
             if fresh_y:
                 c_, g_, y_ = map(np.array, (fresh_c, fresh_g, fresh_y))
                 both = 0 < y_.mean() < 1
@@ -747,6 +760,8 @@ def main():
     if test:
         log(event="eval", step=args.steps, split="test", **evaluate_on(test))
     save(os.path.join(args.out, "checkpoints", run_name))
+    if qlog is not None:
+        qlog.close()
     if args.refresh_every:
         publisher.close()
     if llm is not None:  # in-process vLLM's shutdown can hang holding the GPU
