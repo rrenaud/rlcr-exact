@@ -474,6 +474,8 @@ def main():
         run_name += f"_F{args.support_floor:g}"
         if args.floor_decay_from is not None:
             run_name += f"-anneal{args.floor_decay_from:g}"
+    if args.lora_r != 4:
+        run_name += f"_r{args.lora_r}"
     if args.init_adapter:
         run_name += "_cont"
     if args.samples_per_row > 1:
