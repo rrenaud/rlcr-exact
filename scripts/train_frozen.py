@@ -678,16 +678,45 @@ def main():
             micro = args.micro_batch or (len(group) if packed else 1)
             # Sampled: every row's draws are needed for the group baseline before any backward. With the group in
             # one forward (packed), draw from that forward's own q; split into parts, draw first in a no-grad pass.
-            prepass = args.objective == "sampled" and (micro < len(group) or args.sampled_prepass)
+            # --answer-pg with the group split into parts (--micro-batch): the group's rewards, baseline and SNR come
+            # from a no-grad pass first, so each part's advantages equal the one-forward ones.
+            split = bool(args.answer_pg) and micro < len(group)
+            prepass = (args.objective == "sampled" and (micro < len(group) or args.sampled_prepass)) or split
             if prepass:
                 with torch.no_grad():
-                    qs = torch.cat([(score(model, [r[1] for r in part]) if dT is None else
-                                     score(model, [r[1] for r in part], temperature=dT)[-1]).exp().float()
-                                    for part in chunks(group, len(group) if packed else args.eval_batch)])
-                draws = sample_draws(qs, [row.correct for row in group], values_gpu, args.samples_per_row)
-                baseline = np.mean([r for row_draws in draws for _, r in row_draws])
-                if args.pg_reward == "sampled":
-                    draws, baseline = rlcr_draws(draws, group, zero_reward, len(bad[group[0].qid.split("#")[0]]))
+                    outs = [score(model, [r[1] for r in part], temperature=dT)
+                            for part in chunks(group, micro if split else len(group) if packed else args.eval_batch)]
+                    lp_all = torch.cat([o if dT is None else o[0] for o in outs])
+                    lp_pol_all = torch.cat([o if dT is None else o[-1] for o in outs])
+                    qs = lp_pol_all.exp().float()
+                if args.objective == "sampled":
+                    draws = sample_draws(qs, [row.correct for row in group], values_gpu, args.samples_per_row)
+                    baseline = np.mean([r for row_draws in draws for _, r in row_draws])
+                    if args.pg_reward == "sampled":
+                        draws, baseline = rlcr_draws(draws, group, zero_reward, len(bad[group[0].qid.split("#")[0]]))
+            if split:
+                qid0 = group[0].qid.split("#")[0]
+                bad_p = bad[qid0]
+                y_all = torch.tensor([r[2] for r in group], device=lp_all.device)
+                r_all = exact_objective(lp_pol_all, values_gpu, y_all[:, None]) if args.pg_reward == "exact" else \
+                    y_all.to(lp_all.dtype) if args.pg_reward == "accuracy" else \
+                    torch.tensor([d[0][1] for d in draws], device=y_all.device, dtype=lp_all.dtype)
+                zero_all = torch.tensor([(row.qid, row.j) in zero_reward for row in group], device=y_all.device)
+                r_all = torch.where(zero_all, 0.0, r_all)
+                mean_r_all = r_all.sum() / (len(group) + len(bad_p))
+                adv_all = r_all - mean_r_all
+                stats["pg_reward"] += r_all.sum().item() / n_rows
+                stats["pg_adv_abs"] += adv_all.abs().sum().item() / n_rows
+                acc = torch.where(r_all == 0, 0.0, 0.5 * y_all)
+                acc_c = acc - acc.sum() / (len(group) + len(bad_p))
+                stats["pg_adv_acc_abs"] += acc_c.abs().sum().item() / n_rows
+                stats["pg_adv_cal_abs"] += (adv_all - acc_c).abs().sum().item() / n_rows
+                stats["pg_malformed"] += len(bad_p) / n_rows
+                parts_snr, mixed = reward_snr(lp_all.exp().float(), values_gpu.float(), y_all.float(), zero_all, len(bad_p))
+                for kind in ("all", "mixed" if mixed else "uniform"):
+                    snr[f"{kind}_groups"] += 1
+                    for k, v in parts_snr.items():
+                        snr[f"{kind}_{k}"] += v
             for start in range(0, len(group), micro):
                 part = group[start: start + micro]
                 if args.answer_kl or args.answer_pg:
@@ -716,8 +745,12 @@ def main():
                             draws, baseline = rlcr_draws(draws, group, zero_reward, len(bad[group[0].qid.split("#")[0]]))
                     loss = sampled_loss(logps_pol, draws[start: start + len(part)], baseline)
                 terms = [("objective", args.conf_weight * loss)] if args.conf_weight else []
-                if args.answer_pg:
-                    assert len(part) == len(group), "--answer-pg needs the whole group in one forward"
+                if args.answer_pg and split:  # rewards and baseline from the prepass; malformed rollouts after the parts
+                    lp = answer_logp(model, states, [row.prefix for row in part], [row.start for row in part], dT or 1.0)
+                    scale = 1.0 if args.pg_balance == "rlcr" else n_rows / max(n_tok, 1)
+                    terms.append(("pg", args.answer_pg * -(adv_all[start: start + len(part)] * lp).sum() * scale))
+                    stats["alpha_eff"] = args.answer_pg * (n_tok / n_rows if args.pg_balance == "rlcr" else 1.0)
+                elif args.answer_pg:
                     qid0 = group[0].qid.split("#")[0]
                     r = expected.detach() if args.pg_reward == "exact" else y if args.pg_reward == "accuracy" else \
                         torch.tensor([d[0][1] for d in draws[start: start + len(part)]], device=y.device, dtype=expected.dtype)
@@ -771,6 +804,16 @@ def main():
                         fresh_g += values_gpu[logps.argmax(-1)].tolist(); fresh_y += y.tolist()
                         lp_ = (q_ @ levels_gpu.T.float()).clamp_min(1e-12); fresh_p += (lp_ / lp_.sum(-1, keepdim=True)).tolist()
                 stats["mass"] += logps.exp().sum().item() / n_rows
+            if split and bad_p:  # malformed rollouts (adv = -mean_r), in chunks of the same size, with their own backward
+                start_b = len(questions[qid0]["prompt_ids"])
+                scale = 1.0 if args.pg_balance == "rlcr" else n_rows / max(n_tok, 1)
+                for chunk_b in chunks(bad_p, micro):
+                    states_b = packed_candidate_logps(model, chunk_b, None)
+                    term = args.answer_pg * mean_r_all * answer_logp(model, states_b, chunk_b, [start_b] * len(chunk_b), dT or 1.0).sum() * scale
+                    before = flat_grad(trainable) if decompose else None
+                    (term / n_rows).backward()
+                    if decompose:
+                        parts["pg"] = parts.get("pg", 0) + flat_grad(trainable) - before
         if decompose:
             log(event="grad", step=step, **grad_report(parts, previous_parts))
             previous_parts = parts
