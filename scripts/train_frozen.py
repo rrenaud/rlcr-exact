@@ -102,7 +102,7 @@ def make_scorer(name, tok):
     if name == "digit":
         ids = DigitIds.from_tokenizer(tok)
         def score(model, prefixes, greedy=False, hidden=False, temperature=None):
-            assert temperature is None, "--draw-temperature needs a trie scorer"
+            assert temperature is None, "--policy-temperature needs a trie scorer"
             return level_logps(model, prefixes, ids, greedy, hidden)
         return LEVELS, score, dict(levels=len(LEVELS))
     cands = (hotpot_candidates(tok) if name == "hotpot" else hotpot_stop_candidates(tok) if name == "hotpot-stop"
@@ -111,7 +111,7 @@ def make_scorer(name, tok):
 
     def score(model, prefixes, greedy=False, hidden=False, temperature=None):
         # One packed forward: the rows' common start (a question's prompt, shared by its rollouts) runs once.
-        # temperature=T appends the candidates' logps with every token sampled at T (for --draw-temperature).
+        # temperature=T appends the candidates' logps with every token sampled at T (for --policy-temperature).
         return packed_candidate_logps(model, prefixes, cands.trie, greedy=greedy, hidden=hidden, temperature=temperature)
     return cands.values, score, dict(candidates=len(cands.strings), trie_nodes=len(cands.trie.tokens))
 
@@ -236,20 +236,20 @@ def answer_kl(model, states, rows, ref_topk=None):
     return torch.stack(out)
 
 
-def _chunk_logp(lm_head, h, ids):
-    return lm_head(h).float().log_softmax(-1).gather(-1, ids[:, None]).sum()
+def _chunk_logp(lm_head, h, ids, temperature=1.0):
+    return (lm_head(h).float() / temperature).log_softmax(-1).gather(-1, ids[:, None]).sum()
 
 
-def answer_logp(model, states, prefixes, starts):
-    """[rows] summed log-probs of each row's tokens prefix[start:] (with grad), from the forward's hidden states;
-    chunked and recomputed in backward like the KL."""
+def answer_logp(model, states, prefixes, starts, temperature=1.0):
+    """[rows] summed log-probs of each row's tokens prefix[start:] (with grad), from the forward's hidden states, at
+    the given token temperature; chunked and recomputed in backward like the KL."""
     head = model.get_base_model().lm_head
     out = []
     for h_all, p, s in zip(states, prefixes, starts):
         h, ids = h_all[s - 1: len(p) - 1], torch.tensor(p[s:], device=h_all.device)
         total = h.new_zeros((), dtype=torch.float32)
         for c in range(0, len(h), KL_CHUNK):
-            total = total + checkpoint(_chunk_logp, head, h[c: c + KL_CHUNK], ids[c: c + KL_CHUNK], use_reentrant=False)
+            total = total + checkpoint(_chunk_logp, head, h[c: c + KL_CHUNK], ids[c: c + KL_CHUNK], temperature, use_reentrant=False)
         out.append(total)
     return torch.stack(out)
 
@@ -391,9 +391,11 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--warmup-steps", type=int, default=0,
                     help="linear lr warmup from 0 over this many steps, then constant (RLCR: constant_with_warmup, 5%% of the steps)")
-    ap.add_argument("--draw-temperature", type=float, default=None,
-                    help="--objective sampled: draw each confidence from q at this token temperature, and score the draw by "
-                         "its tempered log-prob (RLCR samples and computes log-probs at 0.7); default: untempered q")
+    ap.add_argument("--policy-temperature", type=float, default=None,
+                    help="train the policy at this token temperature, as RLCR's trainer does (logits / 0.7, its sampling "
+                         "temperature): the answer tokens' log-probs in --answer-pg, the confidence q that the exact objective "
+                         "averages over and the sampled arm draws from and scores. The KL penalty and dev metrics stay "
+                         "untempered. Default: untempered")
     ap.add_argument("--lora-r", type=int, default=4)
     ap.add_argument("--lora-first-layer", type=int, default=14, help="adapt only layers >= this one (Qwen2.5-7B has 28)")
     ap.add_argument("--problems-per-step", type=int, default=4, help="problems per update (x their rollouts each)")
@@ -489,8 +491,8 @@ def main():
         run_name += f"_r{args.lora_r}"
     if args.warmup_steps:
         run_name += f"_wu{args.warmup_steps}"
-    if args.draw_temperature is not None:
-        run_name += f"_dT{args.draw_temperature:g}"
+    if args.policy_temperature is not None:
+        run_name += f"_pT{args.policy_temperature:g}"
     if args.rollouts_per_question != 8:
         run_name += f"_g{args.rollouts_per_question}"
     if args.train_questions:
@@ -618,8 +620,7 @@ def main():
     zero_reward = set()  # tail-fault rows (format fails only after the confidence); refreshed runs rebind it per refresh
     qlog = None if args.no_log_q else gzip.open(os.path.join(args.out, f"q_{run_name}.jsonl.gz"), "at")
     trainable = [p for p in model.parameters() if p.requires_grad]
-    dT = args.draw_temperature
-    assert dT is None or args.objective == "sampled", "--draw-temperature is for --objective sampled"
+    dT = args.policy_temperature
     for step in range(1, args.steps + 1):
         if args.warmup_steps:
             for g in opt.param_groups:
@@ -695,9 +696,9 @@ def main():
                 else:
                     out = score(model, [r[1] for r in part], temperature=dT)
                     logps = out[0] if dT is not None else out
-                logps_draw = logps if dT is None else out[-1]  # the distribution the sampled arm draws from
+                logps_pol = logps if dT is None else out[-1]  # the policy's q (tempered with --policy-temperature)
                 y = torch.tensor([r[2] for r in part], device=logps.device)
-                expected = exact_objective(logps, values_gpu, y[:, None])  # [rows]
+                expected = exact_objective(logps_pol, values_gpu, y[:, None])  # [rows], under the policy's q
                 if qlog is not None:  # every rollout's q over the levels, before this step's update
                     with torch.no_grad():
                         q_ = logps.detach().exp().float(); R_ = rlcr_reward(values_gpu.float(), y[:, None].float())
@@ -709,11 +710,11 @@ def main():
                     loss = -expected.sum()
                 else:
                     if not prepass:  # the whole group is this part
-                        draws = sample_draws(logps_draw.detach().exp().float(), [row.correct for row in group], values_gpu, args.samples_per_row)
+                        draws = sample_draws(logps_pol.detach().exp().float(), [row.correct for row in group], values_gpu, args.samples_per_row)
                         baseline = np.mean([r for row_draws in draws for _, r in row_draws])
                         if args.pg_reward == "sampled":
                             draws, baseline = rlcr_draws(draws, group, zero_reward, len(bad[group[0].qid.split("#")[0]]))
-                    loss = sampled_loss(logps_draw, draws[start: start + len(part)], baseline)
+                    loss = sampled_loss(logps_pol, draws[start: start + len(part)], baseline)
                 terms = [("objective", args.conf_weight * loss)] if args.conf_weight else []
                 if args.answer_pg:
                     assert len(part) == len(group), "--answer-pg needs the whole group in one forward"
@@ -724,12 +725,12 @@ def main():
                     bad_p = bad[qid0]
                     mean_r = r.sum() / (len(part) + len(bad_p))  # group mean over all its rollouts (malformed earn 0)
                     adv = r - mean_r
-                    lp = answer_logp(model, states, [row.prefix for row in part], [row.start for row in part])
+                    lp = answer_logp(model, states, [row.prefix for row in part], [row.start for row in part], dT or 1.0)
                     pg = -(adv * lp).sum()
                     if bad_p:
                         start_b = len(questions[qid0]["prompt_ids"])
                         states_b = packed_candidate_logps(model, bad_p, None)
-                        pg = pg + mean_r * answer_logp(model, states_b, bad_p, [start_b] * len(bad_p)).sum()  # adv = -mean_r
+                        pg = pg + mean_r * answer_logp(model, states_b, bad_p, [start_b] * len(bad_p), dT or 1.0).sum()  # adv = -mean_r
                     scale = 1.0 if args.pg_balance == "rlcr" else n_rows / max(n_tok, 1)
                     terms.append(("pg", args.answer_pg * pg * scale))
                     stats["alpha_eff"] = args.answer_pg * (n_tok / n_rows if args.pg_balance == "rlcr" else 1.0)
