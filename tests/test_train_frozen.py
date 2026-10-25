@@ -212,3 +212,10 @@ def test_adapter_and_optimizer_round_trip(tmp_path):
     opt2 = torch.optim.Adam(params2, lr=1e-2)
     opt2.load_state_dict(torch.load(tmp_path / "optimizer.pt"))
     assert all(torch.equal(opt.state[a]["exp_avg_sq"], opt2.state[b]["exp_avg_sq"]) for a, b in zip(params, params2))
+
+
+def test_token_parts_caps_rows_and_tokens():
+    from train_frozen import token_parts
+    assert token_parts([], 8, 100) == []
+    assert token_parts([10] * 5, 2, 100) == [(0, 2), (2, 4), (4, 5)]
+    assert token_parts([60, 50, 1536, 10, 10], 8, 100) == [(0, 1), (1, 2), (2, 3), (3, 5)]  # a long row alone

@@ -120,6 +120,16 @@ def chunks(xs, n):
     return [xs[i: i + n] for i in range(0, len(xs), n)]
 
 
+def token_parts(lengths, max_rows, max_tokens):
+    """Consecutive [start, end) ranges of at most max_rows rows and max_tokens summed lengths (a longer row alone)."""
+    out, start, tok = [], 0, 0
+    for i, n in enumerate(lengths):
+        if i > start and (i - start == max_rows or tok + n > max_tokens):
+            out.append((start, i)); start, tok = i, 0
+        tok += n
+    return out + [(start, len(lengths))] if lengths else out
+
+
 def ece(c, y, bins=10, centred=False):
     """Expected calibration error. Floor bins [k/10, (k+1)/10) as in the paper, or, with centred=True, one bin per
     level (nearest 0.1), for confidences that sit on or next to the levels."""
@@ -384,6 +394,9 @@ def main():
                          "tail after </confidence> are kept (needs a reference cache built with ref_topk.py --tail-ok); rlcr11: only "
                          "0.0 .. 1.0 in the spaced spelling, each through the end token, same rows as hotpot-stop; rlcr11-math: "
                          "0.0 .. 1.0 in RLVR-math's newline spelling, closed by > or >\\n, then <|endoftext|>")
+    ap.add_argument("--part-tokens", type=int, default=2500,
+                    help="with --answer-pg and --micro-batch below the group size: also cap each part's completion tokens "
+                         "(malformed rollouts run to the 1536-token limit)")
     ap.add_argument("--micro-batch", type=int, default=None,
                     help="rows per forward/backward when training (default: a whole problem group for the trie "
                          "scorers, whose rows share the prompt and are packed into one forward; 1 for digit)")
@@ -681,11 +694,14 @@ def main():
             # --answer-pg with the group split into parts (--micro-batch): the group's rewards, baseline and SNR come
             # from a no-grad pass first, so each part's advantages equal the one-forward ones.
             split = bool(args.answer_pg) and micro < len(group)
+            ranges = token_parts([len(r.prefix) - r.start for r in group], micro, args.part_tokens) if split else \
+                [(i, min(i + micro, len(group))) for i in range(0, len(group), micro)]
             prepass = (args.objective == "sampled" and (micro < len(group) or args.sampled_prepass)) or split
             if prepass:
                 with torch.no_grad():
                     outs = [score(model, [r[1] for r in part], temperature=dT)
-                            for part in chunks(group, micro if split else len(group) if packed else args.eval_batch)]
+                            for part in ([group[a:b] for a, b in ranges] if split else
+                                         chunks(group, len(group) if packed else args.eval_batch))]
                     lp_all = torch.cat([o if dT is None else o[0] for o in outs])
                     lp_pol_all = torch.cat([o if dT is None else o[-1] for o in outs])
                     qs = lp_pol_all.exp().float()
@@ -717,8 +733,8 @@ def main():
                     snr[f"{kind}_groups"] += 1
                     for k, v in parts_snr.items():
                         snr[f"{kind}_{k}"] += v
-            for start in range(0, len(group), micro):
-                part = group[start: start + micro]
+            for start, end in ranges:
+                part = group[start: end]
                 if args.answer_kl or args.answer_pg:
                     out = score(model, [r[1] for r in part], hidden=True, temperature=dT)  # [rows, K], hidden states
                     logps, states = out[:2]
@@ -807,7 +823,8 @@ def main():
             if split and bad_p:  # malformed rollouts (adv = -mean_r), in chunks of the same size, with their own backward
                 start_b = len(questions[qid0]["prompt_ids"])
                 scale = 1.0 if args.pg_balance == "rlcr" else n_rows / max(n_tok, 1)
-                for chunk_b in chunks(bad_p, micro):
+                for a, b in token_parts([len(p) - start_b for p in bad_p], micro, args.part_tokens):
+                    chunk_b = bad_p[a:b]
                     states_b = packed_candidate_logps(model, chunk_b, None)
                     term = args.answer_pg * mean_r_all * answer_logp(model, states_b, chunk_b, [start_b] * len(chunk_b), dT or 1.0).sum() * scale
                     before = flat_grad(trainable) if decompose else None
