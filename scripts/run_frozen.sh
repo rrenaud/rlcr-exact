@@ -1,5 +1,5 @@
 #!/bin/bash
-# One Stage A run (gpuq payload): [TASK=math|math-rlvr|hotpot|hotpot-rlvr|hotpot-rlvr-stop|hotpot-rlvr-11] run_frozen.sh OBJECTIVE LR SEED [extra train_frozen.py args]
+# One Stage A run (gpuq payload): [TASK=math|math-rlvr|hotpot|hotpot-rlvr|hotpot-rlvr-stop|hotpot-rlvr-11|hotpot-base-11] run_frozen.sh OBJECTIVE LR SEED [extra train_frozen.py args]
 # PY=<interpreter> overrides the trainer's Python (the vLLM env for --backend vllm).
 # math-rlvr: MATH_C=<math_pilot_prep.sh output dir for one prompt> (pass its --ref-topk MATH_C/ref_topk_train); ends with
 # gen_eval_math.sh under that prompt (base rollouts shared in MATH_C/gen_base)
@@ -10,6 +10,9 @@ if [ $RLVR = 1 ]; then  # uncalibrated start: RLVR-hotpot
   # -stop and -11 score the end token after </confidence> and keep tail-fault rows (pass the --tail-ok --ref-topk)
   SC=$(case "$TASK" in hotpot-rlvr-stop) echo hotpot-stop;; hotpot-rlvr-11) echo rlcr11;; *) echo hotpot;; esac)
   S="--scorer $SC --model mehuldamani/hotpot-v2-correctness-7b"; G="--model mehuldamani/hotpot-v2-correctness-7b"
+elif [ "${TASK:-math}" = hotpot-base-11 ]; then  # RLCR's own start: Qwen/Qwen2.5-7B base, rlcr11 scorer
+  C=/data/gpuq-runs/rrenaud/rlcr-hotpot-base-cache/run-20261025T023323Z-bccf3eeb46; T=hotpot
+  S="--scorer rlcr11 --model Qwen/Qwen2.5-7B"; G="--model Qwen/Qwen2.5-7B"
 elif [ "${TASK:-math}" = math-rlvr ]; then  # RLVR-math, analysis regenerated under one prompt
   C=${MATH_C:?set MATH_C}; T=math; S="--scorer rlcr11-math --model mehuldamani/big-math-digits-v2-correctness"
 elif [ "${TASK:-math}" = hotpot ]; then
