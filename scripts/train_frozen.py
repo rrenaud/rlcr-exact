@@ -101,15 +101,18 @@ def make_scorer(name, tok):
     [rows, width, d] tensor for digit, a list of per-row [width, d] tensors for the tries."""
     if name == "digit":
         ids = DigitIds.from_tokenizer(tok)
-        score = lambda model, prefixes, greedy=False, hidden=False: level_logps(model, prefixes, ids, greedy, hidden)
+        def score(model, prefixes, greedy=False, hidden=False, temperature=None):
+            assert temperature is None, "--draw-temperature needs a trie scorer"
+            return level_logps(model, prefixes, ids, greedy, hidden)
         return LEVELS, score, dict(levels=len(LEVELS))
     cands = (hotpot_candidates(tok) if name == "hotpot" else hotpot_stop_candidates(tok) if name == "hotpot-stop"
              else rlcr11_candidates(tok) if name == "rlcr11" else rlcr11_math_candidates(tok) if name == "rlcr11-math"
              else make_candidates(tok))
 
-    def score(model, prefixes, greedy=False, hidden=False):
+    def score(model, prefixes, greedy=False, hidden=False, temperature=None):
         # One packed forward: the rows' common start (a question's prompt, shared by its rollouts) runs once.
-        return packed_candidate_logps(model, prefixes, cands.trie, greedy=greedy, hidden=hidden)
+        # temperature=T appends the candidates' logps with every token sampled at T (for --draw-temperature).
+        return packed_candidate_logps(model, prefixes, cands.trie, greedy=greedy, hidden=hidden, temperature=temperature)
     return cands.values, score, dict(candidates=len(cands.strings), trie_nodes=len(cands.trie.tokens))
 
 
@@ -386,6 +389,11 @@ def main():
                          "scorers, whose rows share the prompt and are packed into one forward; 1 for digit)")
     ap.add_argument("--eval-batch", type=int, default=1, help="rows per no-grad forward (evaluation, sampling)")
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--warmup-steps", type=int, default=0,
+                    help="linear lr warmup from 0 over this many steps, then constant (RLCR: constant_with_warmup, 5%% of the steps)")
+    ap.add_argument("--draw-temperature", type=float, default=None,
+                    help="--objective sampled: draw each confidence from q at this token temperature, and score the draw by "
+                         "its tempered log-prob (RLCR samples and computes log-probs at 0.7); default: untempered q")
     ap.add_argument("--lora-r", type=int, default=4)
     ap.add_argument("--lora-first-layer", type=int, default=14, help="adapt only layers >= this one (Qwen2.5-7B has 28)")
     ap.add_argument("--problems-per-step", type=int, default=4, help="problems per update (x their rollouts each)")
@@ -479,6 +487,10 @@ def main():
             run_name += f"-anneal{args.floor_decay_from:g}"
     if args.lora_r != 4:
         run_name += f"_r{args.lora_r}"
+    if args.warmup_steps:
+        run_name += f"_wu{args.warmup_steps}"
+    if args.draw_temperature is not None:
+        run_name += f"_dT{args.draw_temperature:g}"
     if args.rollouts_per_question != 8:
         run_name += f"_g{args.rollouts_per_question}"
     if args.train_questions:
@@ -606,7 +618,12 @@ def main():
     zero_reward = set()  # tail-fault rows (format fails only after the confidence); refreshed runs rebind it per refresh
     qlog = None if args.no_log_q else gzip.open(os.path.join(args.out, f"q_{run_name}.jsonl.gz"), "at")
     trainable = [p for p in model.parameters() if p.requires_grad]
+    dT = args.draw_temperature
+    assert dT is None or args.objective == "sampled", "--draw-temperature is for --objective sampled"
     for step in range(1, args.steps + 1):
+        if args.warmup_steps:
+            for g in opt.param_groups:
+                g["lr"] = args.lr * min(1.0, step / args.warmup_steps)
         if len(order) < args.problems_per_step:
             order += random.sample(group_ids, len(group_ids))
         if args.refresh_every and (step - 1) % args.refresh_every == 0:
@@ -663,7 +680,8 @@ def main():
             prepass = args.objective == "sampled" and (micro < len(group) or args.sampled_prepass)
             if prepass:
                 with torch.no_grad():
-                    qs = torch.cat([score(model, [r[1] for r in part]).exp().float()
+                    qs = torch.cat([(score(model, [r[1] for r in part]) if dT is None else
+                                     score(model, [r[1] for r in part], temperature=dT)[-1]).exp().float()
                                     for part in chunks(group, len(group) if packed else args.eval_batch)])
                 draws = sample_draws(qs, [row.correct for row in group], values_gpu, args.samples_per_row)
                 baseline = np.mean([r for row_draws in draws for _, r in row_draws])
@@ -672,9 +690,12 @@ def main():
             for start in range(0, len(group), micro):
                 part = group[start: start + micro]
                 if args.answer_kl or args.answer_pg:
-                    logps, states = score(model, [r[1] for r in part], hidden=True)  # [rows, K], hidden states
+                    out = score(model, [r[1] for r in part], hidden=True, temperature=dT)  # [rows, K], hidden states
+                    logps, states = out[:2]
                 else:
-                    logps = score(model, [r[1] for r in part])
+                    out = score(model, [r[1] for r in part], temperature=dT)
+                    logps = out[0] if dT is not None else out
+                logps_draw = logps if dT is None else out[-1]  # the distribution the sampled arm draws from
                 y = torch.tensor([r[2] for r in part], device=logps.device)
                 expected = exact_objective(logps, values_gpu, y[:, None])  # [rows]
                 if qlog is not None:  # every rollout's q over the levels, before this step's update
@@ -688,11 +709,11 @@ def main():
                     loss = -expected.sum()
                 else:
                     if not prepass:  # the whole group is this part
-                        draws = sample_draws(logps.detach().exp().float(), [row.correct for row in group], values_gpu, args.samples_per_row)
+                        draws = sample_draws(logps_draw.detach().exp().float(), [row.correct for row in group], values_gpu, args.samples_per_row)
                         baseline = np.mean([r for row_draws in draws for _, r in row_draws])
                         if args.pg_reward == "sampled":
                             draws, baseline = rlcr_draws(draws, group, zero_reward, len(bad[group[0].qid.split("#")[0]]))
-                    loss = sampled_loss(logps, draws[start: start + len(part)], baseline)
+                    loss = sampled_loss(logps_draw, draws[start: start + len(part)], baseline)
                 terms = [("objective", args.conf_weight * loss)] if args.conf_weight else []
                 if args.answer_pg:
                     assert len(part) == len(group), "--answer-pg needs the whole group in one forward"

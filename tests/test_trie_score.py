@@ -103,3 +103,20 @@ def test_tries_last_and_no_trie_layouts_match():
     assert torch.allclose(a, b, atol=1e-5) and pa == pb
     for x, y, z in zip(sa, sb, sc):
         assert torch.allclose(x, y, atol=1e-5) and torch.allclose(x, z, atol=1e-5)
+
+
+def test_packed_temperature_matches_full_sequences():
+    """temperature=T: each candidate's logp with every token drawn from softmax(logits / T); T = 1 is the plain one."""
+    from rlcr_exact.trie_score import packed_candidate_logps
+    prefixes = [PREFIX + [40, 41], PREFIX + [42]]
+    trie = build_trie(CANDS)
+    model = tiny_model(seed=4)
+    with torch.no_grad():
+        cand, states, cand_t = packed_candidate_logps(model, prefixes, trie, hidden=True, temperature=0.7)
+        assert torch.allclose(packed_candidate_logps(model, prefixes, trie, temperature=1.0)[1], cand, atol=1e-5)
+        for b, p in enumerate(prefixes):
+            want = []
+            for c in CANDS:
+                logp = (model(input_ids=torch.tensor([p + c])).logits[0].float() / 0.7).log_softmax(-1)
+                want.append(sum(logp[len(p) - 1 + i, t] for i, t in enumerate(c)))
+            assert torch.allclose(cand_t[b], torch.stack(want), atol=1e-4), (b, cand_t[b], want)

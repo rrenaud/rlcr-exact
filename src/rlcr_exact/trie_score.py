@@ -101,7 +101,7 @@ def _ancestor_matrix(trie: Trie) -> torch.Tensor:
 
 
 def packed_candidate_logps(model, prefixes: list[list[int]], trie: Trie | None, greedy: bool = False, hidden: bool = False,
-                           tries_last: bool = False):
+                           tries_last: bool = False, temperature: float | None = None):
     """candidate_logps for several prefixes at once, running their common start a single time.
 
     Layout of the one sequence: [shared][suffix_1][trie_1][suffix_2][trie_2]...  where shared is the longest
@@ -114,6 +114,9 @@ def packed_candidate_logps(model, prefixes: list[list[int]], trie: Trie | None, 
     tries_last=True lays out [shared][suffix_1]..[suffix_B][trie_1]..[trie_B] instead, so the suffixes sit at the
     same offsets whatever the trie size (same values in exact arithmetic; in bf16 the kernels' blocking can
     differ). trie=None packs no candidates and returns only the hidden states (a reference forward).
+
+    temperature=T also returns, last, the candidates' logps when every token is sampled at temperature T
+    (log_softmax(logits / T) at each trie position, as vLLM and RLCR's trainer temper them).
     """
     model = model.get_base_model() if hasattr(model, "get_base_model") else model  # unwrap PEFT
     device = next(model.parameters()).device
@@ -167,6 +170,9 @@ def packed_candidate_logps(model, prefixes: list[list[int]], trie: Trie | None, 
     node_logp = logp[:, par_idx, tok_idx]  # [rows, nodes]: log p(node token | its parent's context)
     cand = torch.stack([node_logp[:, path].sum(-1) for path in trie.leaf_paths], dim=-1)  # [rows, candidates]
     out = [cand]
+    if temperature is not None:
+        node_t = (logp / temperature).log_softmax(-1)[:, par_idx, tok_idx]  # logits / T, up to a per-position constant
+        cand_t = torch.stack([node_t[:, path].sum(-1) for path in trie.leaf_paths], dim=-1)
     if greedy:
         child = {(p, t): i for i, (t, p) in enumerate(zip(trie.tokens, trie.parents))}
         leaf_of = {path[-1]: k for k, path in enumerate(trie.leaf_paths)}
@@ -183,4 +189,6 @@ def packed_candidate_logps(model, prefixes: list[list[int]], trie: Trie | None, 
         out.append(picks)
     if hidden:
         out.append([torch.cat([states[:shared], states[s0:e0]]) for s0, e0, _ in spans])
+    if temperature is not None:
+        out.append(cand_t)
     return out[0] if len(out) == 1 else tuple(out)
