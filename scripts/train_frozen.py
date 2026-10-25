@@ -415,6 +415,9 @@ def main():
     ap.add_argument("--sampled-prepass", action="store_true",
                     help="draw sampled completions from a separate no-grad forward even when the group is one forward "
                          "(the old path; same draws, slower; for checking)")
+    ap.add_argument("--train-questions", default=None,
+                    help="online runs: a prompt file (id, answer, source, prompt_ids per line, e.g. build_rlcr_train.py's) whose "
+                         "questions are all trained on, in place of --train's (which keeps only questions with a well-formed cached rollout)")
     ap.add_argument("--ref-topk", default=None, help="ref_topk.py cache of --train for the penalty (default: live pass)")
     ap.add_argument("--max-prefix", type=int, default=4608)
     ap.add_argument("--train-problems", type=int, default=None,
@@ -476,6 +479,10 @@ def main():
             run_name += f"-anneal{args.floor_decay_from:g}"
     if args.lora_r != 4:
         run_name += f"_r{args.lora_r}"
+    if args.rollouts_per_question != 8:
+        run_name += f"_g{args.rollouts_per_question}"
+    if args.train_questions:
+        run_name += "_tq"
     if args.init_adapter:
         run_name += "_cont"
     if args.samples_per_row > 1:
@@ -552,7 +559,13 @@ def main():
     if args.refresh_every or args.gen_dev_every:
         from rlcr_exact.online import OnlineRefTopk, Roller, gen_metrics, load_questions, rollout_stats
         from rlcr_exact.shared_vllm import AdapterPublisher
-        questions = {q["id"]: q for q in load_questions(args.train) if q["id"] in groups}
+        if args.train_questions:
+            assert args.refresh_every and not args.train_problems, "--train-questions needs --refresh-every"
+            questions = {q["id"]: q for q in load_questions(args.train_questions)}
+            group_ids = sorted(questions)
+            log(event="train_questions", path=args.train_questions, questions=len(questions))
+        else:
+            questions = {q["id"]: q for q in load_questions(args.train) if q["id"] in groups}
         roller = Roller(llm, args.rlcr, k=args.rollouts_per_question, temperature=args.gen_temperature,
                         max_new=args.gen_max_new, seed=args.seed)
         publisher = AdapterPublisher(f"/dev/shm/{os.environ.get('USER', 'u')}_{os.path.basename(args.out.rstrip('/'))}_{run_name}")
@@ -769,7 +782,9 @@ def main():
                               for sfx, m in (("", np.ones(len(y_), bool)), ("_correct", y_ == 1), ("_wrong", y_ == 0)) if m.any()}
                 fresh_c, fresh_g, fresh_y, fresh_p = [], [], [], []
             log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, lr=opt.param_groups[0]["lr"], floor_beta=floor_weight(args, step),
-                adam_fraction=adam_fraction(opt), **{k: round(v, 4) for k, v in stats.items()}, **levels_log)
+                adam_fraction=adam_fraction(opt), peak_gb=round(torch.cuda.max_memory_allocated() / 2 ** 30, 2),
+                **{k: round(v, 4) for k, v in stats.items()}, **levels_log)
+            torch.cuda.reset_peak_memory_stats()  # peak_gb: the largest allocation since the last train record
         if step % args.eval_every == 0 or step == args.steps:
             log(event="eval", step=step, split="dev", **evaluate_dev())
         if args.gen_dev_every and (step % args.gen_dev_every == 0 or step == args.steps):
