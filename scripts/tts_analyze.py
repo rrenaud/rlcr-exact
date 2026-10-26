@@ -9,7 +9,9 @@ Input: tts_score.py's scores.jsonl (k rollouts per question, each with every mod
    (cluster share of the k votes, mean and max of each model's confidence in the cluster, mean sampled log-prob)
    with label "cluster answer correct", picked by argmax. It is fit by progressive validation: questions in a fixed
    shuffled order, each block of --block questions scored by a model fit on all questions before it (the first block
-   by majority vote), so every number is out-of-sample. Logistic regression and LightGBM.
+   by majority vote), so every number is out-of-sample. Pointwise learners (logistic regression, LightGBM) pool answers
+   across questions; within-question learners (conditional logit: a softmax over each question's answers; LightGBM
+   lambdarank with the question as the query) train only on the choice the pick actually makes.
 
 usage: tts_analyze.py SCORES.jsonl [--block 100] [--seed 0] [--json OUT.json]
 """
@@ -18,6 +20,7 @@ import argparse, collections, json, random, warnings
 import lightgbm as lgb
 warnings.filterwarnings("ignore", message="X does not have valid feature names")
 import numpy as np
+from scipy.optimize import minimize
 from scipy.stats import spearmanr
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
@@ -116,7 +119,7 @@ def cluster_feats(rs):
             v = [r[m] for r in cr if not np.isnan(r[m])]
             f += [np.mean(v) if v else 0.0, max(v) if v else 0.0, np.sum(v) / len(rs) if v else 0.0]
         f.append(np.mean([r["mean_logprob"] for r in cr]))
-        out.append((ans, cr[0]["correct"], f))
+        out.append((ans, max(r["correct"] for r in cr), f))  # the answer is right if any sample of it is (format-gated per sample)
     return out
 
 
@@ -137,31 +140,87 @@ for i, m in enumerate(models):
 res = {n: np.mean([fn(q) for q in qids]) for n, fn in rules.items()}
 
 
+class Pointwise:
+    """A classifier over candidate answers pooled across questions: P(this answer is correct)."""
+    def __init__(self, make):
+        self.make = make
+
+    def fit(self, groups):
+        y = [c for _, ys in groups for c in ys]
+        self.m = self.make().fit(np.vstack([X for X, _ in groups]), y) if len(set(y)) > 1 else None
+        return self
+
+    def score(self, X):
+        return self.m.predict_proba(X)[:, 1] if self.m else X[:, 0]
+
+
+class CondLogit:
+    """Within-question choice: softmax over one question's candidate answers, trained to put mass on the correct one
+    (questions with one candidate or none correct carry no information and are skipped). Standardised features, L2."""
+    def __init__(self, l2=1.0):
+        self.l2 = l2
+
+    def fit(self, groups):
+        gs = [(X, np.array(y)) for X, y in groups if len(y) > 1 and 0 < sum(y)]
+        if not gs:
+            self.w = None; return self
+        allX = np.vstack([X for X, _ in gs]); self.mu, self.sd = allX.mean(0), allX.std(0) + 1e-9
+        gs = [((X - self.mu) / self.sd, y / y.sum()) for X, y in gs]
+        def loss(w):
+            f, g = self.l2 * w @ w / 2, self.l2 * w
+            for X, t in gs:
+                z = X @ w; z = z - z.max(); p = np.exp(z) / np.exp(z).sum()
+                f -= t @ np.log(p + 1e-300); g -= X.T @ (t - p)
+            return f / len(gs), g / len(gs)
+        self.w = minimize(loss, np.zeros(allX.shape[1]), jac=True, method="L-BFGS-B").x
+        return self
+
+    def score(self, X):
+        return (X - self.mu) / self.sd @ self.w if self.w is not None else X[:, 0]
+
+
+class Ranker:
+    """LightGBM lambdarank with each question as a query group."""
+    def fit(self, groups):
+        gs = [(X, y) for X, y in groups if len(y) > 1 and 0 < sum(y)]
+        self.m = None
+        if len(gs) >= 20:
+            self.m = lgb.LGBMRanker(n_estimators=200, learning_rate=0.05, num_leaves=7, min_child_samples=20, verbose=-1)
+            self.m.fit(np.vstack([X for X, _ in gs]), np.concatenate([np.array(y, int) for _, y in gs]), group=[len(y) for _, y in gs])
+        return self
+
+    def score(self, X):
+        return self.m.predict(X) if self.m else X[:, 0]
+
+
+def groups_of(qq, cols):
+    return [(np.array([f for _, _, f in CF[q]])[:, cols], [c for _, c, _ in CF[q]]) for q in qq if CF[q]]
+
+
 def progressive(make, cols=None):
+    """Block b of questions is scored by make().fit on all earlier questions; returns (accuracy, second-half hits)."""
+    cols = list(range(len(FEAT_NAMES))) if cols is None else cols
     hits = []
     for b in range(0, len(qids), a.block):
-        seen, block = qids[:b], qids[b: b + a.block]
-        Xtr = [f for q in seen for _, _, f in CF[q]]; ytr = [c for q in seen for _, c, _ in CF[q]]
-        fit = None
-        if len(set(ytr)) > 1:
-            Xtr = np.array(Xtr)[:, cols] if cols is not None else np.array(Xtr)
-            fit = make().fit(Xtr, ytr)
-        for q in block:
+        fit = make().fit(groups_of(qids[:b], cols)) if b else None
+        for q in qids[b: b + a.block]:
             if not CF[q]:
                 hits.append(0.0); continue
             Xq = np.array([f for _, _, f in CF[q]])
-            s = fit.predict_proba(Xq[:, cols] if cols is not None else Xq)[:, 1] if fit else Xq[:, 0]
-            hits.append(solved(q, s))
+            hits.append(solved(q, fit.score(Xq[:, cols]) if fit else Xq[:, 0] + 1e-6 * Xq[:, -1]))
     return np.mean(hits), hits[len(hits) // 2:]
 
 
-logit = lambda: make_pipeline(StandardScaler(), LogisticRegression(C=1.0, max_iter=2000))
-gbdt = lambda: lgb.LGBMClassifier(n_estimators=200, learning_rate=0.05, num_leaves=15, min_child_samples=20, verbose=-1)
+logit = lambda: Pointwise(lambda: make_pipeline(StandardScaler(), LogisticRegression(C=1.0, max_iter=2000)))
+gbdt = lambda: Pointwise(lambda: lgb.LGBMClassifier(n_estimators=200, learning_rate=0.05, num_leaves=15, min_child_samples=20, verbose=-1))
 share_lp = [0, len(FEAT_NAMES) - 1]
-learned = {"logistic: share + logprob": (logit, share_lp), "logistic: all": (logit, None), "gbdt: all": (gbdt, None)}
+learned = {"logistic: share + logprob": (logit, share_lp), "logistic: all": (logit, None), "gbdt: all": (gbdt, None),
+           "cond. logit: share + logprob": (CondLogit, share_lp), "cond. logit: all": (CondLogit, None),
+           "lambdarank: all": (Ranker, None)}
 for m in models:
     i = 1 + 3 * models.index(m)
     learned[f"logistic: share + {m}"] = (logit, [0, i, i + 1, i + 2])
+    learned[f"cond. logit: share + {m}"] = (CondLogit, [0, i, i + 1, i + 2])
 second_half = {}
 for n, (mk, cols) in learned.items():
     res[n], second_half[n] = progressive(mk, cols)
@@ -171,11 +230,18 @@ print(f"\nanswer accuracy over {len(qids)} questions (learned: progressive valid
 mv_half = np.mean([rules["majority vote"](q) for q in half])
 for n, v in sorted(res.items(), key=lambda kv: -kv[1]):
     h = np.mean(second_half[n]) if n in second_half else np.mean([rules[n](q) for q in half])
-    print(f"  {n:<36}{v:.3f}   {h:.3f} ({h - mv_half:+.3f} vs vote)")
+    print(f"  {n:<44}{v:.3f}   {h:.3f} ({h - mv_half:+.3f} vs vote)")
 out["selection"] = res
 out["selection_second_half"] = {n: float(np.mean(second_half[n]) if n in second_half else np.mean([rules[n](q) for q in half])) for n in res}
-fit = gbdt().fit(np.array([f for q in qids for _, _, f in CF[q]]), [c for q in qids for _, c, _ in CF[q]])
+fit = gbdt().fit(groups_of(qids, list(range(len(FEAT_NAMES))))).m
 imp = sorted(zip(FEAT_NAMES, fit.booster_.feature_importance("gain")), key=lambda t: -t[1])
 print("\ngbdt gain (all questions):", ", ".join(f"{n} {g / max(sum(g for _, g in imp), 1e-9):.2f}" for n, g in imp[:8]))
+cl = CondLogit().fit(groups_of(qids, list(range(len(FEAT_NAMES)))))
+print("\nconditional logit weights (all questions, per SD):", ", ".join(f"{n} {w:+.2f}" for n, w in zip(FEAT_NAMES, cl.w)))
+out["condlogit_weights"] = dict(zip(FEAT_NAMES, cl.w.tolist()))
+informative = [q for q in qids if len(CF[q]) > 1 and 0 < sum(c for _, c, _ in CF[q])]
+print(f"questions where the pick matters (>= 2 answers, one of them correct): {len(informative)} / {len(qids)}; "
+      f"best possible pick {np.mean([any(c for _, c, _ in CF[q]) for q in qids]):.3f}; majority vote on those "
+      f"{np.mean([rules['majority vote'](q) for q in informative]):.3f}")
 if a.json:
     json.dump(out, open(a.json, "w"), indent=1, default=float)

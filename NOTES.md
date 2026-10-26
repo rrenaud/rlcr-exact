@@ -982,3 +982,74 @@ rows. Tokens ranked by mean lens log-prob of a group minus the low-Brier group's
   analysis: errors that look like clean matches from the inside.
 - R- and J-lens agree at layers 18-26; R surfaces hedges earlier. Both lead the logit lens by ~4 layers. Caveats: lenses
   fitted on base weights and reused for the merged adapter; group-mean single-token readouts, not causal.
+
+**Over training and with contrast probes** (side task: RPS 500-step config retrained with `--save-every 50`, RunPod,
+`run` `full-rps-w01-ckpt-s0`, dev 0.185 / 0.813; `jspace.py readout-steps` over all 11 checkpoints, 497 test rows,
+logit / J / R lenses). Rows the final model rates 0.0-0.2 carry a hedge token at layer 22 (J) 38% of the time at step 0,
+75% by step 50, 88-100% from step 100; rows rated 0.8-1.0 stay at <= 11%, and their certainty-token share swings
+between checkpoints (68% at 100, 5% at 150, 73% at 250, 17% at 500). Contrast probes at <confidence> (lens log-prob of
+one token set minus another: right-wrong, correct-incorrect, yes-no, sure-unsure, true-false, certainty-hedge lists):
+
+| score | AUROC | AUPRC right | AUPRC wrong |
+|---|---|---|---|
+| step 500: trained head (expected level) | **0.791** | **0.741** | **0.839** |
+| step 500: J correct - incorrect, layer 22 | 0.762 | 0.676 | 0.805 |
+| step 500: R certainty - hedge lists, layer 20 | 0.758 | 0.696 | 0.798 |
+| step 500: J certainty - hedge count in top-20, layer 26 | 0.730 | 0.656 | 0.744 |
+| step 0: stated confidence | 0.527 | 0.447 | 0.605 |
+| step 0: logit correct - incorrect, layer 10 | 0.616 | 0.552 | 0.666 |
+
+Before training, the internals read correctness better than the stated number; after, the trained head beats every
+readout. Best layers were picked on these rows (slightly optimistic). Chance AUPRC 0.45 right / 0.55 wrong.
+
+## Progressive validation from the training logs (2026-10-26)
+
+`q_<run>.jsonl.gz` logs every training rollout's 11-level distribution before that step's update, and the 500-step
+runs see each of the 2,000 train questions once, so it is a free out-of-sample curve (50-step windows, ~1,500 rows).
+- AUROC: agreement (no labels) leads at steps 51-200 (0.72-0.77 vs 0.63-0.74 for exact and rps); all arms reach 0.76-0.80 by the end.
+- Mean confidence minus accuracy: exact and rps stay within +-0.03 of 0; **agreement and agreement + 10% labels sit at
+  +0.10 to +0.15 throughout**, so agreement's overconfidence is on train rows too, not a dev/train mismatch, and 10%
+  labels do not move it. Its train Brier ends 0.01-0.02 worse than the labelled arms.
+- The pre-answer head's outputs are not in the log; dev evals keep only aggregates.
+
+## Test-time scaling: can the heads pick a better answer than majority vote? (2026-10-26)
+
+`scripts/tts_gen.py` (vLLM 0.11; 0.10.2 sampled garbage at T > 0 on this checkpoint while greedy matched the cache
+token for token, `modal_app.py::tts_gen`): 8 samples at T 0.7 per dev and test question, 1,500 questions, prompts from
+the cached files. Sample accuracy 0.373, format 0.749, pass@8 0.598. `scripts/tts_score.py` (`modal_app.py::tts_score`,
+L40S ~3.4 s per question for 8 models): every sample cut after <confidence> and scored by the base model and the
+adapters (the seven 500-step runs; the two 200-step prior-head screens with their pre-answer head, `--prior`).
+`scripts/tts_analyze.py`: correlations and answer selection. Volume `/tts/rollouts_k8.jsonl`,
+`/modal-runs/tts-score-k8{,-prior}/scores.jsonl`.
+
+**Correlations.** The trained heads correlate 0.86-0.99 with each other per sample whatever the loss. With agreement:
+~0.6 across samples, 0.08-0.14 within a question (question means removed). AUROC for the sample being right, across all
+samples vs within a question (761 questions with both): trained heads 0.74-0.77 vs 0.54-0.57, agreement 0.77 vs 0.57,
+log-prob 0.62 vs 0.52, untrained 0.59 vs 0.50. Per question, mean trained confidence predicts solve rate >= 0.5 at AUROC
+0.79-0.81 (agreement-trained at the top), majority share 0.81, the pre-answer difficulty head 0.73 (untrained 0.61);
+difficulty head vs mean post-answer confidence Spearman 0.81-0.86. **The heads learned difficulty, not which of a
+question's answers is right.**
+
+**Selection.** Samples grouped by normalised answer; each answer is a candidate (3,574, 25% right; right if any of its
+samples is) with features vote share, per head mean / max / weighted-vote confidence, and log-prob. Progressive
+validation in blocks of 100 over a shuffled order. Pointwise learners (logistic, LightGBM) pool candidates across
+questions; within-question learners (conditional logit over each question's candidates; LightGBM lambdarank grouped
+by question) train on the 373 questions with >= 2 answers and one right (majority vote gets 0.649 of them).
+
+| method | accuracy | second half |
+|---|---|---|
+| best possible pick | 0.598 | |
+| conditional logit, share + exact s1 | 0.515 | 0.527 |
+| confidence-weighted vote, exact s1 | 0.515 | 0.524 |
+| majority vote | 0.511 | 0.523 |
+| GBDT, all features | 0.510 | 0.525 |
+| lambdarank, all features | 0.506 | 0.513 |
+| conditional logit, all 32 features | 0.503 | 0.516 |
+| first sample | 0.383 | 0.384 |
+
+The best rule beats vote on 12 questions and loses on 6. Fit on all questions (per SD), the conditional logit puts
+share +0.73-0.86 and mean confidence +0.75-1.13 on one head, but the two move together, so the pick rarely changes;
+fits on every head at once overfit. To help selection, training needs a within-question contrast (questions with
+several distinct answers and a loss that ranks the right one above the others). An earlier version labelled a
+candidate by its first sample, which the format gate often zeroes (vote 0.390, best pick 0.469); fixed.
+Write-up: https://claude.ai/artifact/XHsGFkVS6CXejbKy4bLuhU
