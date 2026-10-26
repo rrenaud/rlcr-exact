@@ -115,6 +115,17 @@ def rlcr11_math_candidates(tokenizer) -> Candidates:
     return Candidates(strings, torch.tensor(values), build_trie(seqs))
 
 
+PRIOR_INSTRUCTION = "Before answering, I estimate the probability that my final answer will be correct.\n"
+
+
+def prior_candidates(tokenizer, tag: str = "expected_accuracy") -> Candidates:
+    """A pre-answer head: 0.0 .. 1.0 as ` 0.7 </tag>`, scored after `PRIOR_INSTRUCTION <tag>` inserted where the assistant
+    turn starts. The tag and instruction won the step-0 probe (scripts/tag_probe.py). 11 candidates."""
+    texts = [f"0.{d}" for d in range(10)] + ["1.0"]
+    seqs = [tokenizer(f" {t} </{tag}>", add_special_tokens=False).input_ids for t in texts]
+    return Candidates([f" {t} </{tag}>" for t in texts], torch.tensor([float(t) for t in texts]), build_trie(seqs))
+
+
 def rlcr_reward(values: torch.Tensor, correct: torch.Tensor) -> torch.Tensor:
     """RLCR's total reward for each well-formed candidate (malformed completions earn 0)."""
     y = correct.to(values.dtype)
@@ -132,8 +143,50 @@ def support_floor(logps: torch.Tensor, levels: torch.Tensor) -> torch.Tensor:
     -mean_l log sum_{j in l} q_j. Its gradient on a level's logit is about q_l - 1/L, which does not vanish when q
     is peaked (the expected reward's gradient on a candidate is proportional to its probability), so it keeps
     some probability on every level. The uniform-mixture idea of ReFIne's confidence remap, as a regularizer."""
+    return level_ce(logps, levels, torch.full((1, levels.shape[0]), 1 / levels.shape[0], device=logps.device))
+
+
+def level_ce(logps: torch.Tensor, levels: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """[rows] cross-entropy from a target over the levels ([rows or 1, L]) to each row's level marginal (not
+    renormalised, so unlisted mass costs too), -sum_l T_l log sum_{j in l} q_j. Proper, minimised at q = T; its
+    gradient on a level's logit is about q_l - T_l, so it moves mass onto levels a peaked q leaves empty."""
     marginal = torch.logsumexp(logps[:, None, :] + levels.clamp_min(1e-30).log()[None], dim=-1)  # [rows, L]
-    return -marginal.mean(-1)
+    return -(target.to(marginal.dtype) * marginal).sum(-1)
+
+
+def correctness_target(k: torch.Tensor, n: torch.Tensor, levels: int = 11, prior: float = 1.0) -> torch.Tensor:
+    """[rows, levels] the posterior over a question's correctness rate p, given k of its n rollouts correct, spread over
+    the levels 0.0, 0.1, ..., 1.0: Beta(k + prior, n - k + prior) mass on each level's bin [v - 0.05, v + 0.05] (the end
+    bins clipped to [0, 1]), read off the Beta CDF at the bin edges. With 8 rollouts it is wide (k = 8, uniform prior:
+    37% on 1.0, 40% on 0.9, 23% below; k = 4: 0.2-0.8 all above 4%), so a forecast scored against it is not pushed
+    to a point mass."""
+    from scipy.special import betainc
+    edges = (torch.arange(1, levels, dtype=torch.float64) - 0.5) / (levels - 1)  # 0.05, 0.15, ..., 0.95
+    a = (k.double().cpu() + prior)[:, None]
+    b = (n.double().cpu() - k.double().cpu() + prior)[:, None]
+    cdf = torch.from_numpy(betainc(a.numpy(), b.numpy(), edges[None].numpy()))
+    cdf = torch.cat([torch.zeros_like(cdf[:, :1]), cdf, torch.ones_like(cdf[:, :1])], -1)
+    return (cdf[:, 1:] - cdf[:, :-1]).to(torch.float32).to(k.device)
+
+
+def rps_objective(logps: torch.Tensor, levels: torch.Tensor, target: torch.Tensor):
+    """(rps [rows], listed mass [rows]): the ranked probability score of each row's level distribution, renormalised over
+    the listed mass, against a target distribution over the same levels, sum_l (Q_l - T_l)^2 / (L - 1) over the
+    cumulative distributions (0 when they agree, 1 when all mass sits at the opposite end). Proper: minimised at q = T.
+    The unlisted mass is left to a separate format term (format_loss)."""
+    marginal = logps.exp() @ levels.T.to(logps.dtype)  # [rows, L]
+    mass = marginal.sum(-1)
+    cq = (marginal / mass.clamp_min(1e-12)[:, None]).cumsum(-1)[:, :-1]
+    ct = target.to(cq.dtype).cumsum(-1)[:, :-1]
+    return ((cq - ct) ** 2).sum(-1) / (levels.shape[0] - 1), mass
+
+
+def format_loss(mass: torch.Tensor, eps: float = 0.0) -> torch.Tensor:
+    """-log(mass + eps): a soft clip between the log term (eps = 0, a cross-entropy on landing on the list, whose
+    pull on the logits keeps its strength at low mass) and the linear 1 - mass that RLCR's 0/1 format reward implies.
+    Its gradient is the linear term's divided by (mass + eps): at mass 0.19 about 5x the linear term for eps = 0,
+    1.4x for eps = 0.5; near mass 1 both match the log term up to a constant factor."""
+    return -(mass + eps).clamp_min(1e-12).log()
 
 
 def exact_objective(logps: torch.Tensor, values: torch.Tensor, correct: torch.Tensor) -> torch.Tensor:

@@ -11,6 +11,9 @@ confidence completion is trained, over one of two candidate sets scored exactly:
                   (confidence.hotpot_candidates)
 
   exact:   maximize sum_j q_j R_j (the unlisted mass earns 0, as a malformed completion does in RLCR)
+  rps:     forecast the question's correctness rate: RPS of the row's level distribution against the Beta posterior
+           of the rate from the group's k of n correct rollouts (spread over the levels by its CDF), minus
+           --format-weight x log(listed mass)
   sampled: GRPO on the confidence tokens alone: sample --samples-per-row k completions per row from q (or "other"),
            advantage = reward minus the mean over the problem group's rows x k draws (no std division, as in
            RLCR), loss -(1/k) sum A log q per row. Exact is its k -> infinity limit (a baseline changes only variance).
@@ -33,7 +36,7 @@ the only signal that regenerated answers would change.
 usage: train_frozen.py --train ROLLOUTS --dev ROLLOUTS [--test ROLLOUTS] --objective exact|sampled
                        [--scorer digit|trie] ...
 """
-import argparse, collections, gzip, json, math, os, random, sys, time
+import argparse, collections, gzip, json, math, os, random, sys, time, zlib
 
 import numpy as np
 import torch
@@ -43,9 +46,9 @@ from sklearn.metrics import roc_auc_score
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from rlcr_exact.confidence import exact_objective, hotpot_candidates, hotpot_stop_candidates, level_matrix, make_candidates, rlcr11_candidates, rlcr11_math_candidates, rlcr_reward, support_floor
+from rlcr_exact.confidence import PRIOR_INSTRUCTION, correctness_target, prior_candidates, exact_objective, format_loss, level_ce, rps_objective, hotpot_candidates, hotpot_stop_candidates, level_matrix, make_candidates, rlcr11_candidates, rlcr11_math_candidates, rlcr_reward, support_floor
 from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
-from rlcr_exact.grading import em_correct, f1_correct, tail_only_failure
+from rlcr_exact.grading import agreement, em_correct, f1_correct, tail_only_failure
 from rlcr_exact.trie_score import packed_candidate_logps
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "rlcr-reward-conf-weighted-tt-scaling"))
@@ -58,7 +61,7 @@ LINEAR_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"
 # A training row: one cached rollout, cut after "<confidence>". j is the output's index within its question.
 # correct is RLCR's label (exact match for HotpotQA), which training uses; correct_f1 (F1 >= 0.5) is reported.
 STOP_SCORERS = ("hotpot-stop", "rlcr11")  # score through the end token, so tail-fault rows are kept (earn 0 off-list)
-Row = collections.namedtuple("Row", "qid prefix correct start j correct_f1")
+Row = collections.namedtuple("Row", "qid prefix correct start j correct_f1 agree", defaults=(None,))  # agree: (k, m), grading.agreement
 
 
 def load_rows(path, token_bytes, max_prefix, tail_ok=False):
@@ -78,7 +81,7 @@ def load_rows(path, token_bytes, max_prefix, tail_ok=False):
 
 def question_rows(q, token_bytes, max_prefix, tail_ok, dropped, qid=None):
     """load_rows for one question's rollouts (a cache line, or a fresh rollout dict from online.Roller)."""
-    rows = []
+    rows, agree = [], agreement(q["outputs"])
     for j, (text, ids, ok, correct) in enumerate(zip(q["outputs"], q["completion_ids"], q["format_ok"], q["correct"])):
         tail_fault = tail_ok and not ok and tail_only_failure(text)
         cut = cut_point(text, ids, "confidence", token_bytes) if ok or tail_fault else None
@@ -90,7 +93,7 @@ def question_rows(q, token_bytes, max_prefix, tail_ok, dropped, qid=None):
         prefix = q["prompt_ids"] + ids[:cut]
         if len(prefix) > max_prefix:
             dropped["long"] += 1; continue
-        rows.append(Row(qid or q["id"], prefix, float(correct), len(q["prompt_ids"]), j, f1_correct(text, q["answer"])))
+        rows.append(Row(qid or q["id"], prefix, float(correct), len(q["prompt_ids"]), j, f1_correct(text, q["answer"]), agree[j]))
     return rows
 
 
@@ -143,6 +146,11 @@ def floor_weight(args, step):
         return args.support_floor
     start = args.floor_decay_from * args.steps
     return args.support_floor * min(1.0, max(0.0, (args.steps - step) / max(args.steps - start, 1)))
+
+
+def warm_weight(args, step):
+    """Warm-start weight at this step: --warm-ce at step 1, linear to 0 at step --warm-steps + 1, 0 after."""
+    return args.warm_ce * max(0.0, 1 - (step - 1) / max(args.warm_steps, 1))
 
 
 def sample_draws(qs, correct, values, k):
@@ -388,7 +396,31 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None, help="default: the released checkpoint for the scorer's task")
     ap.add_argument("--train", required=True); ap.add_argument("--dev", required=True); ap.add_argument("--test")
-    ap.add_argument("--objective", choices=["exact", "sampled"], required=True)
+    ap.add_argument("--objective", choices=["exact", "sampled", "rps"], required=True,
+                    help="rps: score each row's level distribution as a forecast of its question's correctness rate (RPS "
+                         "against the Beta posterior from the group's k of n correct rollouts, correctness_target), plus "
+                         "--format-weight times -log(listed mass + --format-eps)")
+    ap.add_argument("--rps-prior", type=float, default=1.0,
+                    help="rps: Beta prior pseudo-count on each side (1 = uniform, 0.5 = Jeffreys)")
+    ap.add_argument("--warm-ce", type=float, default=0.0,
+                    help="warm start, any objective: weight of the cross-entropy from each question's correctness_target "
+                         "(k of n correct, Beta posterior over the levels) to each row's level marginal, annealed "
+                         "linearly to 0 over --warm-steps. The same for every objective, so arms differ after it")
+    ap.add_argument("--warm-steps", type=int, default=50)
+    ap.add_argument("--target", choices=["correct", "agree"], default="correct",
+                    help="what rps and --warm-ce forecast: correct = the question's k of n correct rollouts (one target per "
+                         "question); agree = k of the m other rollouts giving this rollout's answer (per rollout, no labels)")
+    ap.add_argument("--label-frac", type=float, default=0.0,
+                    help="--target agree: this fraction of train questions (fixed by a hash of the qid) uses the correct "
+                         "target instead, i.e. labels on a few questions to set the level of the agreement forecast")
+    ap.add_argument("--prior-head", type=float, default=0.0,
+                    help="weight of a second, pre-answer head (0 = off): `PRIOR_INSTRUCTION <--prior-tag>` inserted after the "
+                         "prompt (unseen by the cached rollouts) forecasts the question's correctness rate, with RPS against "
+                         "--target correct's target, the format term, and the warm start; one extra packed row per question")
+    ap.add_argument("--prior-tag", default="expected_accuracy")
+    ap.add_argument("--format-weight", type=float, default=1.0, help="rps: weight of the format term -log(listed mass + eps)")
+    ap.add_argument("--format-eps", type=float, default=0.0,
+                    help="rps: eps in the format term (0 = the log; larger softens it toward linear 1 - mass at low mass)")
     ap.add_argument("--scorer", choices=["digit", "trie", "hotpot", "hotpot-stop", "rlcr11", "rlcr11-math"], default="digit",
                     help="hotpot-stop: the hotpot candidates through `confidence>` + end token, and rows whose only fault is the "
                          "tail after </confidence> are kept (needs a reference cache built with ref_topk.py --tail-ok); rlcr11: only "
@@ -500,6 +532,14 @@ def main():
         run_name += f"_F{args.support_floor:g}"
         if args.floor_decay_from is not None:
             run_name += f"-anneal{args.floor_decay_from:g}"
+    if args.warm_ce:
+        run_name += f"_warm{args.warm_ce:g}x{args.warm_steps}"
+    if args.target != "correct":
+        run_name += f"_{args.target}"
+    if args.label_frac:
+        run_name += f"_lab{args.label_frac:g}"
+    if args.prior_head:
+        run_name += f"_prior{args.prior_head:g}"
     if args.lora_r != 4:
         run_name += f"_r{args.lora_r}"
     if args.warmup_steps:
@@ -576,7 +616,24 @@ def main():
     def save(path):  # adapter + Adam state, so a run can be continued (--init-adapter path)
         model.save_pretrained(path)
         torch.save(opt.state_dict(), os.path.join(path, "optimizer.pt"))
-    evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch)
+    if args.prior_head:  # the pre-answer head: its own trie, scored on one extra row per question (prompt + tag)
+        prior_c = prior_candidates(tok, args.prior_tag)
+        prior_ids = tok(PRIOR_INSTRUCTION + f"<{args.prior_tag}>", add_special_tokens=False).input_ids
+        prior_levels = level_matrix(prior_c.values.cuda())
+        prior_logps = lambda prompts: packed_candidate_logps(model, [p + prior_ids for p in prompts], prior_c.trie)
+
+    def prior_eval(rows):
+        """The pre-answer head's readout on each row's prompt, scored against that row's correctness."""
+        if not args.prior_head:
+            return {}
+        with torch.no_grad():
+            p = torch.cat([prior_logps([r.prefix[: r.start]]) for r in rows]).exp().float() @ prior_levels.T.float()
+        mass = p.sum(-1); pn = p / mass.clamp_min(1e-12)[:, None]
+        c = (pn @ torch.linspace(0, 1, 11, device=p.device)).cpu().numpy(); y = np.array([r.correct for r in rows])
+        return dict(prior_mass=mass.mean().item(), prior_entropy=-(pn * pn.clamp_min(1e-12).log()).sum(-1).mean().item(),
+                    prior_expected_mean=float(c.mean()), prior_expected_brier=float(np.mean((c - y) ** 2)),
+                    prior_expected_auroc=roc_auc_score(y, c) if 0 < y.mean() < 1 else float("nan"))
+    evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch) | prior_eval(rows)
     values_gpu = values.cuda()
     levels_gpu = level_matrix(values_gpu)
     ref_topk = RefTopk(args.ref_topk) if args.ref_topk and not args.refresh_every else None
@@ -619,7 +676,7 @@ def main():
     def evaluate_dev():
         if args.train_problems:
             log(event="eval", step=step, split="train", **evaluate_on(train))
-        return evaluate(model, dev, values, score, args.eval_batch, drift_rows)
+        return evaluate(model, dev, values, score, args.eval_batch, drift_rows) | prior_eval(dev)
     step = 0
     if not args.skip_initial_eval:
         log(event="eval", step=0, split="dev", **evaluate_dev())
@@ -751,8 +808,20 @@ def main():
                         for row, p_, m_, e1, v1 in zip(part, lp_.tolist(), q_.sum(-1).tolist(), e_.tolist(), v_.tolist()):
                             qlog.write(json.dumps(dict(step=step, qid=row.qid, j=row.j, y=row[2], tail_fault=(row.qid, row.j) in zero_reward,
                                                        p=[round(x, 5) for x in p_], mass=round(m_, 5), r=round(e1, 5), var_q=round(v1, 6))) + "\n")
+                warm = warm_weight(args, step)
+                if args.objective == "rps" or warm:  # correct: one target per question, k of its n kept rollouts correct
+                    agree = args.target == "agree" and zlib.crc32(str(group[0].qid).encode()) % 1000 >= 1000 * args.label_frac
+                    k_n = torch.tensor([r.agree for r in part] if agree else
+                                       [[sum(r.correct for r in group), len(group)]], device=y.device)
+                    target = correctness_target(k_n[:, 0], k_n[:, 1], levels_gpu.shape[0], args.rps_prior).expand(len(part), -1)
                 if args.objective == "exact":
                     loss = -expected.sum()
+                elif args.objective == "rps":
+                    rps, mass = rps_objective(logps_pol, levels_gpu, target)
+                    fmt = format_loss(mass, args.format_eps)
+                    loss = rps.sum()
+                    stats["rps"] += rps.sum().item() / n_rows
+                    stats["format"] += fmt.sum().item() / n_rows
                 else:
                     if not prepass:  # the whole group is this part
                         draws = sample_draws(logps_pol.detach().exp().float(), [row.correct for row in group], values_gpu, args.samples_per_row)
@@ -761,6 +830,8 @@ def main():
                             draws, baseline = rlcr_draws(draws, group, zero_reward, len(bad[group[0].qid.split("#")[0]]))
                     loss = sampled_loss(logps_pol, draws[start: start + len(part)], baseline)
                 terms = [("objective", args.conf_weight * loss)] if args.conf_weight else []
+                if args.objective == "rps" and args.format_weight:  # its own term, so --grad-decomp-every separates it
+                    terms.append(("format", args.conf_weight * args.format_weight * fmt.sum()))
                 if args.answer_pg and split:  # rewards and baseline from the prepass; malformed rollouts after the parts
                     lp = answer_logp(model, states, [row.prefix for row in part], [row.start for row in part], dT or 1.0)
                     scale = 1.0 if args.pg_balance == "rlcr" else n_rows / max(n_tok, 1)
@@ -797,6 +868,10 @@ def main():
                             snr[f"{kind}_groups"] += 1
                             for k, v in parts_snr.items():
                                 snr[f"{kind}_{k}"] += v
+                if warm:
+                    ce = level_ce(logps_pol, levels_gpu, target)
+                    terms.append(("warm", warm * ce.sum()))
+                    stats["warm_ce"] += ce.sum().item() / n_rows
                 if args.support_floor:
                     floor = support_floor(logps, levels_gpu)
                     terms.append(("floor", floor_weight(args, step) * floor.sum()))
@@ -805,6 +880,17 @@ def main():
                     kl = answer_kl(model, states, part, ref_topk)
                     terms.append(("kl", args.answer_kl * kl.sum()))
                     stats["answer_kl"] += kl.sum().item() / n_rows
+                if args.prior_head and start == 0:  # once per question: the pre-answer head on the shared prompt
+                    lp_prior = prior_logps([group[0].prefix[: group[0].start]])
+                    kn = torch.tensor([[sum(r.correct for r in group), len(group)]], device=y.device)
+                    t_prior = correctness_target(kn[:, 0], kn[:, 1], 11, args.rps_prior)
+                    rps_p, mass_p = rps_objective(lp_prior, prior_levels, t_prior)
+                    prior = rps_p + args.format_weight * format_loss(mass_p, args.format_eps)
+                    if warm:
+                        prior = prior + warm * level_ce(lp_prior, prior_levels, t_prior)
+                    terms.append(("prior", args.prior_head * len(group) * prior.sum()))  # x rows: one question, weighted like its rows
+                    stats["prior_rps"] += rps_p.sum().item() / len(batch)
+                    stats["prior_mass"] += mass_p.sum().item() / len(batch)
                 if decompose:  # one backward per term (graph kept), each term's gradient read off as a difference
                     for k, (name, term) in enumerate(terms):
                         before = flat_grad(trainable)

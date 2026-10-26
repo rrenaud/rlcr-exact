@@ -27,3 +27,10 @@ def test_tail_only_failure_and_em():
     assert not tail_only_failure(good.replace("0.7", "1.3") + "junk")  # out of range
     assert not tail_only_failure("no tags at all")
     assert em_correct(good + "assistant", "beatles") == 1.0 and em_correct(good, "Rolling Stones") == 0.0
+
+
+def test_agreement_counts_other_rollouts_with_the_same_answer():
+    from rlcr_exact.grading import agreement
+    t = lambda a: f"<think>x</think><answer>{a}</answer>"
+    texts = [t("The Beatles"), t("beatles"), t("Rolling Stones"), "no answer", t("Beatles!")]
+    assert agreement(texts) == [(2, 4), (2, 4), (0, 4), (0, 4), (2, 4)]

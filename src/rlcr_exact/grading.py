@@ -40,6 +40,14 @@ def f1_correct(text, gold, threshold=0.5):
     return float(token_f1(last_answer(text), gold) >= threshold)
 
 
+def agreement(texts):
+    """[(k, m)] per rollout: k of the m = len(texts) - 1 other rollouts whose last <answer> equals its own after RLCR's
+    normalize_answer (an empty answer agrees with nothing). The self-consistency count of each answer, no gold label."""
+    answers = [normalize_answer(last_answer(t)) for t in texts]
+    counts = collections.Counter(a for a in answers if a)
+    return [((counts[a] - 1) if a else 0, len(texts) - 1) for a in answers]
+
+
 def em_correct(text, gold):
     """1.0 if the last <answer> matches the gold answer exactly after RLCR's normalize_answer (format not checked)."""
     return float(normalize_answer(last_answer(text)) == normalize_answer(gold))

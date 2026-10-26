@@ -827,3 +827,158 @@ Then:
 - Out-of-domain evals of the best adapter; Stage B (online GRPO with exact confidence reward) if Stage A holds up.
 
 Older plan items (math, digit-scorer default, HotpotQA rebuild) are done or dropped; see the sections above.
+
+## Distributional confidence targets: RPS, warm start, agreement (2026-10-26)
+
+New objective `--objective rps` (`confidence.py`: `correctness_target`, `rps_objective`, `format_loss`, `level_ce`):
+the confidence head's level distribution is scored as a forecast of a rate, against a Beta(k + a, n - k + a)
+posterior binned onto the 11 levels by its CDF at 0.05, 0.15, ..., 0.95 (wide by design: 8 of 8 right puts 37% on
+1.0, 40% on 0.9). Loss = RPS over the cumulative distributions (renormalised over the listed mass; proper, optimum
+q = T, so not a point mass) + `--format-weight` x -log(listed mass + `--format-eps`).
+- `--target correct`: k of the question's n kept rollouts correct (one target per question: forecasts difficulty, so
+  it cannot separate right from wrong rollouts of one question). `--target agree`: k of the m = n - 1 other rollouts
+  whose normalised last <answer> equals this one's (`grading.agreement`; per rollout, **no gold labels**).
+- `--warm-ce W --warm-steps N`: cross-entropy from the same target to each row's level marginal (unrenormalised, so it
+  also teaches the format), W annealed linearly to 0 over N steps, the same for every objective (the support floor is
+  now `level_ce` with a uniform target).
+
+Prior art (from a literature check): expected Brier over a digit softmax is ConfTuner (arXiv 2508.18847), i.e. our
+exact arm; self-consistency frequency as a confidence target is Uncertainty Distillation (arXiv 2503.14749), as a
+scalar SFT label. Not found: RPS on a confidence-token softmax, or a distribution over the agreement rate as target.
+
+**Modal smokes** (L40S, 10-20 steps, 32 dev rows, `--grad-decomp-every`): with eps = 0 the format term's gradient is
+7.7-8.6 at steps 1-2 (~60x the RPS term, 3x all of exact's) and dev answer KL reaches 1.96 by step 10 (exact 0.81);
+eps = 0.5 gives 2.4 and 1.18. The RPS gradient starts at ~0.11 (it scales with q, and q sits on 0.9/1.0) and takes
+over by steps 6-9. A warm start W = 0.3 is the largest term early (3.4) in both arms and doubles step-10 drift, which
+falls back by step 20.
+
+**Tag probe** (`scripts/tag_probe.py`, Modal, untrained RLVR, 500 train questions): `[instruction] <tag>` inserted after
+the prompt, 11 values x 3 spellings through `</tag>`. Every tag already carries solve-rate signal at step 0 but almost
+no listed mass (0.2-4.5%). With the instruction "Before answering, I estimate the probability that my final answer
+will be correct.": expected_accuracy Spearman vs k/n 0.296 / AUROC 0.677, confidence 0.287 / 0.669, success_probability
+0.251, p_correct 0.246, prior_confidence 0.236, solve_rate 0.170 (0.187 without); difficulty -0.117 (reversed). SE ~0.045.
+Pick for a pre-answer head: `<expected_accuracy>` with the instruction.
+
+**Round 1 screens** (RunPod secure 4090, `scripts/runpod/launch.sh`, `screen_frozen.sh`: 200 steps, lr 3.7e-4, W 0.02,
+seed 0; rps arms eps 0.5; dev 500 rows, EM labels; untrained dev expected Brier ~0.41, AUROC ~0.59):
+
+| run | warm / floor | dev x-Brier | dev x-AUROC | x-ECE | greedy Brier | level entropy | dev answer KL | test x-Brier / AUROC |
+|---|---|---|---|---|---|---|---|---|
+| exact | warm 0.1 x 50 | **0.185** | **0.797** | 0.072 | 0.188 | 0.80 | 0.177 | 0.202 / 0.774 |
+| rps (correct) | warm 0.1 x 50 | 0.190 | 0.794 | 0.061 | 0.222 | 2.03 | 0.173 | 0.212 / 0.769 |
+| rps (correct) | warm 0.3 x 50 | 0.191 | 0.796 | 0.080 | 0.263 | 2.06 | 0.185 | 0.195 / 0.773 |
+| exact | floor 0.053 | 0.194 | 0.793 | 0.093 | 0.201 | 2.10 | 0.143 | 0.197 / 0.766 |
+| **rps agree (no labels)** | warm 0.1 x 50 | 0.197 | 0.787 | 0.072 | 0.226 | 2.09 | 0.169 | 0.217 / 0.781 |
+| rps (correct) | floor 0.053 | 0.199 | 0.783 | 0.078 | 0.234 | 2.19 | 0.182 | 0.223 / 0.754 |
+| exact | warm 0.3 x 50 | 0.204 | 0.772 | 0.067 | 0.206 | 0.44 | 0.168 | 0.218 / 0.762 |
+
+- Everything trains (Brier 0.41 -> 0.19-0.20) with dev answer KL 0.14-0.19, below the ~0.5 limit; one seed each, dev SE
+  ~0.007, so only exact warm 0.3 stands out (worse). Warm 0.1 is at least as good as the floor in both arms.
+- **The label-free agreement target nearly matches labelled training** (0.197 / 0.787 vs 0.185 / 0.797 dev; test AUROC
+  0.781, the best of the round). Trained without any correctness label, judged on correctness.
+- rps keeps the level distribution wide (entropy 2.0-2.2 of 2.40), as intended; its greedy readout is therefore poor
+  (0.22-0.26 Brier) and the expected readout is the one to use. Exact with warm only collapses to entropy 0.4-0.8.
+- Step time 5.0 s on the 4090 (17 GB peak); a screen is ~25 min including setup, ~$0.37.
+
+**Round 2 screens** (same setup; seed 1 of the three warm-0.1 leaders, agreement variants, lr, pre-answer head):
+
+| run | dev x-Brier | dev x-AUROC | x-ECE | dev mean conf | dev answer KL | test x-Brier / AUROC |
+|---|---|---|---|---|---|---|
+| exact w0.1 seed 1 | 0.190 | 0.788 | 0.055 | 0.571 | 0.179 | 0.210 / 0.777 |
+| rps w0.1 seed 1 | **0.186** | 0.794 | **0.044** | 0.542 | 0.194 | 0.204 / 0.770 |
+| rps w0.1 lr 6e-4 | 0.192 | **0.801** | 0.104 | 0.528 | 0.254 | 0.203 / 0.778 |
+| agree w0.1 seed 1 | 0.211 | 0.800 | 0.140 | 0.672 | 0.184 | 0.244 / 0.773 |
+| agree w0.1 lr 6e-4 | 0.195 | 0.791 | 0.075 | 0.580 | 0.251 | 0.210 / 0.785 |
+| agree w0.1 lr 2e-4 | 0.202 | 0.784 | 0.100 | 0.632 | 0.145 | 0.229 / 0.772 |
+| agree w0.3 | 0.201 | 0.792 | 0.106 | 0.638 | 0.174 | 0.228 / 0.781 |
+| agree floor 0.053 | 0.202 | 0.782 | 0.081 | 0.556 | 0.159 | 0.213 / 0.777 |
+| exact w0.1 + prior head 1 | 0.198 | 0.777 | 0.072 | 0.466 | 0.265 | 0.214 / 0.728 |
+| rps w0.1 + prior head 1 | 0.193 | 0.782 | 0.072 | 0.483 | 0.283 | 0.202 / 0.750 |
+
+(dev accuracy 0.532 for every run: the rollouts are frozen.)
+- **exact vs rps (correct), warm 0.1: a tie.** Two-seed means 0.188 / 0.793 (exact) and 0.188 / 0.794 (rps); rps is a
+  little better calibrated (ECE 0.044-0.061 vs 0.055-0.072) and keeps its distribution wide.
+- **Agreement: AUROC holds, calibration does not.** Its AUROC (0.784-0.800) matches the labelled arms in every
+  variant, but its mean confidence runs 0.56-0.67 against 0.53 accuracy: a confident, consistent wrong answer
+  agrees with itself, so the target overstates (Ding's "agreement is not correctness"). Seed spread is large
+  (0.197 vs 0.211). Ranking comes free of labels; the level needs a few labels (or a shrunk target, round 3).
+- **Pre-answer head** (`--prior-head 1`, `<expected_accuracy>` before the answer, its own packed row per question): it
+  learns a real difficulty forecast, dev expected Brier 0.211 / AUROC 0.727 for whether the coming answer is right
+  (base rate 0.249), with 100% listed mass from 0.2-4.5% at step 0. It costs the post-answer head (AUROC 0.777-0.782
+  vs 0.794-0.797) and raises answer KL to 0.27-0.28 at weight 1; 1.4x the step time.
+
+**Round 3** (500-step runs of the three warm-0.1 arms, seed 0, evals at 250 and 500; more screen seeds; agreement
+target with a heavier Beta prior a = 4):
+
+| run | dev x-Brier | dev x-AUROC | x-ECE | dev mean conf | dev answer KL | test x-Brier / AUROC |
+|---|---|---|---|---|---|---|
+| 500 steps: rps (correct) | **0.187** | **0.812** | 0.083 | 0.576 | 0.209 | **0.207** / 0.791 |
+| 500 steps: exact | 0.194 | 0.798 | 0.101 | 0.630 | 0.269 | 0.216 / **0.792** |
+| 500 steps: agree (no labels) | 0.207 | **0.812** | 0.131 | 0.656 | 0.195 | 0.234 / 0.790 |
+| screen: exact seed 2 | 0.220 | 0.738 | 0.091 | 0.487 | 0.159 | 0.220 / 0.724 |
+| screen: rps seed 2 | 0.200 | 0.785 | 0.099 | 0.458 | 0.222 | 0.196 / 0.774 |
+| screen: agree a = 4, seed 0 | 0.211 | 0.777 | 0.117 | 0.559 | 0.135 | 0.223 / 0.770 |
+| screen: agree a = 4, seed 1 | 0.204 | 0.792 | 0.129 | 0.583 | 0.145 | 0.224 / 0.756 |
+
+- **rps beats exact at 500 steps** (0.187 / 0.812 vs 0.194 / 0.798, lower answer KL 0.21 vs 0.27), and is steadier
+  over seeds at 200 steps: three-seed screen means rps 0.192 / 0.791 (0.186-0.200) vs exact 0.198 / 0.774
+  (0.185-0.220; seed 2 is a bad run, AUROC 0.738).
+- At step 250 of the 500-step runs all three arms sit overconfident (mean conf 0.66-0.69, ECE 0.14-0.16) and come
+  back by 500; screen and full runs are not comparable step-for-step.
+- **The agreement arm reaches the labelled arms' AUROC at 500 steps (0.812, same as rps)**; its Brier gap is all level
+  (mean 0.656 vs 0.532). The heavier prior a = 4 pulls the mean down but leaves ECE at 0.12-0.13: shrinking every
+  target to 0.5 does not fix a bias that comes from consistent wrong answers.
+
+**Round 4** (`--label-frac f`: with `--target agree`, a fixed f of train questions, by qid hash, use the correct target
+instead; plus 500-step rps seed 1):
+
+| run | dev x-Brier | dev x-AUROC | x-ECE | dev mean conf | dev answer KL | test x-Brier / AUROC |
+|---|---|---|---|---|---|---|
+| 500 steps: rps seed 1 | 0.195 | 0.813 | 0.122 | 0.561 | 0.229 | 0.210 / 0.781 |
+| screen: agree + labels 10%, seed 0 | 0.195 | 0.793 | 0.095 | 0.614 | 0.172 | 0.218 / 0.781 |
+| screen: agree + labels 10%, seed 1 | 0.199 | 0.790 | 0.102 | 0.547 | 0.197 | 0.212 / 0.760 |
+| screen: agree + labels 25%, seed 0 | 0.197 | 0.789 | 0.083 | 0.611 | 0.180 | 0.220 / 0.781 |
+
+- 500-step rps over two seeds: 0.191 / 0.812 (AUROC very stable, Brier/ECE less so).
+- Labels on 10% of questions move agreement's two-seed screen mean from 0.204 to 0.197 (within seed noise of the gap);
+  25% is no better than 10%. Mixing targets per question leaves most rows on the biased target, so the level only
+  partly moves; a learned offset fit on the labelled few would be the next thing to try.
+
+**Round 5 and the 500-step summary** (two seeds each, dev 500 / test):
+
+| arm (warm 0.1 x 50) | dev x-Brier s0, s1 | dev x-AUROC s0, s1 | dev mean conf | answer KL | test x-Brier / AUROC (mean) |
+|---|---|---|---|---|---|
+| exact | 0.194, 0.186 | 0.798, 0.815 | 0.63, 0.60 | 0.27, 0.22 | 0.214 / 0.792 |
+| rps (correct) | 0.187, 0.195 | 0.812, 0.813 | 0.58, 0.56 | 0.21, 0.23 | 0.209 / 0.786 |
+| rps agree (no labels) | 0.207, 0.232 | 0.812, 0.811 | 0.66, 0.72 | 0.20, 0.19 | 0.251 / 0.791 |
+| rps agree + labels 10% (s0 only) | 0.207 | 0.814 | 0.66 | 0.20 | 0.236 / 0.790 |
+
+Conclusions from the overnight sweep (17 screens + 7 full runs, RunPod, ~$16.6):
+- **rps and exact are a tie at 500 steps** (dev Brier 0.191 vs 0.190, AUROC 0.813 vs 0.807, test Brier 0.209 vs
+  0.214). rps keeps the level distribution wide (entropy ~2.1 vs ~0.4), is less seed-sensitive at 200 steps, and drifts
+  the answer a bit less; its greedy readout is poor, so read it by expectation. No clear win in Brier for the novelty.
+- **Agreement without labels gives full discrimination**: dev AUROC 0.811-0.814 in every 500-step run, identical to
+  the labelled arms, and test AUROC 0.79. Its whole deficit is level: it is overconfident (mean 0.66-0.72 vs 0.53
+  accuracy) and the bias grows with training and varies by seed. A heavier Beta prior and per-question label mixing
+  (10%, 25%) do not fix it. The natural fix is a monotone recalibration (one scalar offset / temperature) fit on a
+  small labelled set: since AUROC is already there, that should recover most of the Brier gap. Needs per-row eval
+  dumps, which `evaluate` does not write yet.
+- Pre-answer `<expected_accuracy>` head learns a real difficulty forecast (AUROC 0.73) but costs the post-answer head
+  at weight 1; a smaller weight is untried.
+
+## J-lens / R-lens readout of low vs high Brier rows (2026-10-26, side task)
+
+`scripts/jspace.py`, `scripts/modal_jspace.py`, `scripts/jspace_report.py` (Modal, 2x H100; lenses and readouts in
+`rlcr-exact-data:/jspace/`). Jacobian lens (anthropics/jacobian-lens 581d398) and the R-lens variant (Blank, Bhatia &
+Nanda: norm scale and SiLU gate treated as constants in backward, MLP gate x up gradient halved; dense-Qwen2 rules
+from safety-research/jpp_lens) fitted on 200 FineWeb-Edu documents with RLVR-hotpot, layers 6-26 step 2. Paper test, 497
+rows. Tokens ranked by mean lens log-prob of a group minus the low-Brier group's.
+- **RLVR baseline** (states ~1.0; its high-Brier rows are its wrong answers): at the confidence tag the workspace reads
+  `imperfect, partially, incomplete, unsure, uncertain` (layer 18) and `ambiguous, questionable` (22) on wrong rows while the
+  text says 1.0; in the analysis `maybe, perhaps, possibly` from layer 18 (R-lens: from layers 10-14). The uncertainty
+  exact training surfaces is already present before training; it never reached the stated number.
+- **Best exact adapter** (`run-20261019T233718Z-f6f79693af`, test Brier 0.187): few extreme errors (8 over, 10 under). Its
+  remaining high-Brier rows read `Almost, majority, strong, perfect` at the tag and `match, straightforward, direct` in the
+  analysis: errors that look like clean matches from the inside.
+- R- and J-lens agree at layers 18-26; R surfaces hedges earlier. Both lead the logit lens by ~4 layers. Caveats: lenses
+  fitted on base weights and reused for the merged adapter; group-mean single-token readouts, not causal.
