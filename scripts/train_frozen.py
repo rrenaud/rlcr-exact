@@ -36,7 +36,7 @@ the only signal that regenerated answers would change.
 usage: train_frozen.py --train ROLLOUTS --dev ROLLOUTS [--test ROLLOUTS] --objective exact|sampled
                        [--scorer digit|trie] ...
 """
-import argparse, collections, gzip, json, math, os, random, sys, time, zlib
+import argparse, collections, gzip, json, math, os, random, shutil, signal, sys, time, zlib
 
 import numpy as np
 import torch
@@ -449,6 +449,12 @@ def main():
                     help="continue from a saved adapter dir (and its optimizer.pt, if there) instead of a fresh LoRA")
     ap.add_argument("--save-every", type=int, default=0,
                     help="also save adapter + optimizer state every N steps, to checkpoints/RUN/stepN")
+    ap.add_argument("--save-steps", default="",
+                    help="comma-separated steps at which to save adapter + optimizer state to checkpoints/RUN/stepN "
+                         "(the pre-registered evaluation checkpoints), each logged as a checkpoint event with its compute_s")
+    ap.add_argument("--resume-every", type=int, default=25,
+                    help="save the full training state every N steps to checkpoints/RUN/resume (0 = only when preempted). "
+                         "A run whose --out holds that state resumes from it, as a gpuq requeue after preemption does")
     ap.add_argument("--eval-every", type=int, default=100)
     ap.add_argument("--skip-initial-eval", action="store_true",
                     help="no step-0 dev eval (identical for every run from the same base; saves ~3.5 min on hotpot)")
@@ -586,6 +592,17 @@ def main():
     log(event="data", train_rows=len(train), train_problems=len(groups), dropped=dropped, dev_rows=len(dev),
         dev_dropped=dev_dropped, test_rows=len(test) if test else 0, **scorer_info, args=vars(args))
 
+    # Preemption (gpuq --priority low): SIGUSR1 or $GPUQ_PREEMPT_FILE asks for the full state to be saved at the next
+    # step boundary and an exit with 75; the requeued run (same --out) resumes from it.
+    resume_dir = os.path.join(args.out, "checkpoints", run_name, "resume")
+    if not os.path.isdir(resume_dir) and os.path.isdir(resume_dir + ".old"):  # interrupted between the two renames
+        os.rename(resume_dir + ".old", resume_dir)
+    resuming = os.path.exists(os.path.join(resume_dir, "state.pt"))
+    preempt = {"requested": False}
+    signal.signal(signal.SIGUSR1, lambda *_: preempt.update(requested=True))
+    preempt_file = os.environ.get("GPUQ_PREEMPT_FILE")
+    adapter_dir = resume_dir if resuming else args.init_adapter
+
     llm = None
     if args.backend == "vllm":
         from rlcr_exact.shared_vllm import bind_hf, start_vllm
@@ -599,17 +616,17 @@ def main():
                                                      device_map={"": 0})
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     layers = list(range(args.lora_first_layer, model.config.num_hidden_layers))
-    if args.init_adapter:
+    if adapter_dir:
         from peft import PeftModel
-        model = PeftModel.from_pretrained(model, args.init_adapter, is_trainable=True)
+        model = PeftModel.from_pretrained(model, adapter_dir, is_trainable=True)
     else:
         model = get_peft_model(model, LoraConfig(r=args.lora_r, lora_alpha=args.lora_r, lora_dropout=0.0,
                                                  target_modules=LINEAR_MODULES, layers_to_transform=layers))
     stop_backward_at_first_adapter(model)
     model.train()
     opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
-    opt_path = os.path.join(args.init_adapter or "", "optimizer.pt")
-    if args.init_adapter and os.path.exists(opt_path):
+    opt_path = os.path.join(adapter_dir or "", "optimizer.pt")
+    if adapter_dir and os.path.exists(opt_path):
         opt.load_state_dict(torch.load(opt_path))
         for g in opt.param_groups:
             g["lr"] = args.lr
@@ -678,9 +695,9 @@ def main():
             log(event="eval", step=step, split="train", **evaluate_on(train))
         return evaluate(model, dev, values, score, args.eval_batch, drift_rows) | prior_eval(dev)
     step = 0
-    if not args.skip_initial_eval:
+    if not args.skip_initial_eval and not resuming:
         log(event="eval", step=0, split="dev", **evaluate_dev())
-    if args.gen_dev_every:
+    if args.gen_dev_every and not resuming:
         gen_dev()
     order, t0, previous_parts = [], time.time(), {}
     # Progressive readout: the last 10 steps' rows scored before their update (expected / argmax confidence, label).
@@ -691,7 +708,38 @@ def main():
     qlog = None if args.no_log_q else gzip.open(os.path.join(args.out, f"q_{run_name}.jsonl.gz"), "at")
     trainable = [p for p in model.parameters() if p.requires_grad]
     dT = args.policy_temperature
-    for step in range(1, args.steps + 1):
+
+    def save_resume(step):
+        """Everything the step loop carries across steps, so a resumed run continues it. Saved only where a refresh
+        is about to start (fresh rollouts are not carried). vLLM's sampling state is not saved: a resumed run's
+        rollouts are new draws, not the ones the uninterrupted run would have made."""
+        tmp, old = resume_dir + ".tmp", resume_dir + ".old"
+        shutil.rmtree(tmp, ignore_errors=True)
+        save(tmp)
+        torch.save(dict(step=step, order=order, seen=seen, refreshes=refreshes if args.refresh_every else 0, compute_s=compute_s,
+                        rng=(random.getstate(), np.random.get_state(), torch.get_rng_state(), torch.cuda.get_rng_state_all()),
+                        windows=(fresh_c, fresh_g, fresh_y, fresh_p, dict(snr))), os.path.join(tmp, "state.pt"))
+        if os.path.isdir(resume_dir):
+            os.rename(resume_dir, old)
+        os.rename(tmp, resume_dir)
+        shutil.rmtree(old, ignore_errors=True)
+
+    # compute_s: training-loop GPU time (rollouts, scoring, updates), without evals, checkpoint saves, model loads or
+    # time lost to preemption; carried across resumes. The cost axis of the pre-registered time/quality frontier.
+    start, compute_s = 0, 0.0
+    save_steps = {int(x) for x in args.save_steps.split(",") if x}
+    if resuming:
+        st = torch.load(os.path.join(resume_dir, "state.pt"), weights_only=False)
+        start, order, seen, compute_s = st["step"], st["order"], st["seen"], st.get("compute_s", 0.0)
+        if args.refresh_every:
+            refreshes = st["refreshes"]
+        fresh_c, fresh_g, fresh_y, fresh_p, snr_saved = st["windows"]
+        snr.update(snr_saved)
+        py, npy, cpu, cuda = st["rng"]
+        random.setstate(py); np.random.set_state(npy); torch.set_rng_state(cpu); torch.cuda.set_rng_state_all(cuda)
+        log(event="resumed", step=start, attempt=os.environ.get("GPUQ_ATTEMPT"))
+    for step in range(start + 1, args.steps + 1):
+        t_step = time.time()
         if args.warmup_steps:
             for g in opt.param_groups:
                 g["lr"] = args.lr * min(1.0, step / args.warmup_steps)
@@ -949,19 +997,38 @@ def main():
                 levels_log |= {f"fresh_level_p{sfx}": [round(float(v), 5) for v in p_[m].mean(0)]
                               for sfx, m in (("", np.ones(len(y_), bool)), ("_correct", y_ == 1), ("_wrong", y_ == 0)) if m.any()}
                 fresh_c, fresh_g, fresh_y, fresh_p = [], [], [], []
-            log(event="train", step=step, seconds=round(time.time() - t0, 1), rows=n_rows, lr=opt.param_groups[0]["lr"], floor_beta=floor_weight(args, step),
+            log(event="train", step=step, seconds=round(time.time() - t0, 1), compute_s=round(compute_s + time.time() - t_step, 1), rows=n_rows, lr=opt.param_groups[0]["lr"], floor_beta=floor_weight(args, step),
                 adam_fraction=adam_fraction(opt), peak_gb=round(torch.cuda.max_memory_allocated() / 2 ** 30, 2),
                 **{k: round(v, 4) for k, v in stats.items()}, **levels_log)
             torch.cuda.reset_peak_memory_stats()  # peak_gb: the largest allocation since the last train record
+        compute_s += time.time() - t_step
+        if step in save_steps:
+            save(os.path.join(args.out, "checkpoints", run_name, f"step{step}"))
+            log(event="checkpoint", step=step, compute_s=round(compute_s, 1), attempt=os.environ.get("GPUQ_ATTEMPT"))
         if step % args.eval_every == 0 or step == args.steps:
             log(event="eval", step=step, split="dev", **evaluate_dev())
         if args.gen_dev_every and (step % args.gen_dev_every == 0 or step == args.steps):
             gen_dev()
         if args.save_every and step % args.save_every == 0 and step < args.steps:
             save(os.path.join(args.out, "checkpoints", run_name, f"step{step}"))
+        boundary = step < args.steps and (not args.refresh_every or step % args.refresh_every == 0)
+        if boundary and (preempt["requested"] or (preempt_file and os.path.exists(preempt_file))):
+            save_resume(step)
+            log(event="preempted", step=step)
+            if qlog is not None:
+                qlog.close()
+            if args.refresh_every:
+                publisher.close()
+            sys.stdout.flush()
+            os._exit(75)  # EX_TEMPFAIL: gpuq requeues the run (os._exit: in-process vLLM's shutdown can hang)
+        if boundary and args.resume_every and step % args.resume_every == 0:
+            save_resume(step)
     if test:
         log(event="eval", step=args.steps, split="test", **evaluate_on(test))
     save(os.path.join(args.out, "checkpoints", run_name))
+    shutil.rmtree(resume_dir, ignore_errors=True)
+    if os.environ.get("GPUQ_RUN_DIR"):
+        open(os.path.join(args.out, "train_done"), "w").close()  # run_frozen.sh: a requeued run skips to its evals
     if qlog is not None:
         qlog.close()
     if args.refresh_every:

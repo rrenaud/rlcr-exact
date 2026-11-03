@@ -21,9 +21,15 @@ else
   C=/data/gpuq-runs/rrenaud/rlcr-math-cache/run-20261015T212410Z-d16f220bfe; T=math; S=""
 fi
 obj=$1 lr=$2 seed=$3; shift 3
+# gpuq preemption (--priority low): this shell ignores SIGUSR1 (untrapped, it would end bash); the trainer polls
+# $GPUQ_PREEMPT_FILE, saves its state and exits 75, and the requeued run resumes. A run requeued after training
+# finished skips straight to the generation check. NO_TEST=1 leaves out the test split (pre-registered runs: test is
+# scored only at the checkpoints the committed selection rule picks).
+trap '' USR1
+[ -n "$GPUQ_RUN_DIR" ] && [ -f "$GPUQ_RUN_DIR/train_done" ] || \
 ${PY:-/home/rrenaud/envs/pytorch/bin/python} scripts/train_frozen.py --objective $obj --lr $lr --seed $seed $S \
   --train $C/rollouts_${T}_fresh_train.jsonl --dev $C/rollouts_${T}_fresh_dev.jsonl --dev-limit 500 \
-  --test $C/rollouts_${T}_fresh_test.jsonl "$@" || exit $?
+  $([ "${NO_TEST:-0}" = 1 ] || echo --test $C/rollouts_${T}_fresh_test.jsonl) "$@" || exit $?
 # Hotpot runs end with a generation check: the adapter on during greedy generation must not hurt accuracy.
 # GEN_EVAL=0 skips it. The adapter is the one checkpoint this run saved.
 if [ "$T" = hotpot ] && [ "${GEN_EVAL:-1}" != 0 ]; then

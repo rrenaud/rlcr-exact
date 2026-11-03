@@ -1,0 +1,117 @@
+{
+ "rng_seed": 20261103,
+ "arms": [
+  "exact",
+  "sampled"
+ ],
+ "configs": [
+  {
+   "stage": "A",
+   "cid": "A0",
+   "default": true,
+   "seed": 100,
+   "lr": 0.00037,
+   "W": 0.02,
+   "F": 0.053
+  },
+  {
+   "stage": "A",
+   "cid": "A1",
+   "default": false,
+   "seed": 101,
+   "lr": 0.0001,
+   "W": 0.012,
+   "F": 0.019
+  },
+  {
+   "stage": "A",
+   "cid": "A2",
+   "default": false,
+   "seed": 102,
+   "lr": 0.00016,
+   "W": 0.016,
+   "F": 0.063
+  },
+  {
+   "stage": "A",
+   "cid": "A3",
+   "default": false,
+   "seed": 103,
+   "lr": 0.00062,
+   "W": 0.094,
+   "F": 0.041
+  },
+  {
+   "stage": "A",
+   "cid": "A4",
+   "default": false,
+   "seed": 104,
+   "lr": 0.00089,
+   "W": 0.025,
+   "F": 0.014
+  },
+  {
+   "stage": "A",
+   "cid": "A5",
+   "default": false,
+   "seed": 105,
+   "lr": 0.00023,
+   "W": 0.039,
+   "F": 0.032
+  },
+  {
+   "stage": "A",
+   "cid": "A6",
+   "default": false,
+   "seed": 106,
+   "lr": 0.00038,
+   "W": 0.0052,
+   "F": 0.15
+  },
+  {
+   "stage": "B",
+   "cid": "B0",
+   "default": true,
+   "seed": 200,
+   "lr": 0.0001,
+   "W": 0.02,
+   "F": 0.0
+  },
+  {
+   "stage": "B",
+   "cid": "B1",
+   "default": false,
+   "seed": 201,
+   "F": 0.0,
+   "lr": 5.6e-05,
+   "W": 0.091
+  },
+  {
+   "stage": "B",
+   "cid": "B2",
+   "default": false,
+   "seed": 202,
+   "F": 0.0,
+   "lr": 0.00024,
+   "W": 0.0054
+  },
+  {
+   "stage": "B",
+   "cid": "B3",
+   "default": false,
+   "seed": 203,
+   "F": 0.0,
+   "lr": 0.00032,
+   "W": 0.03
+  },
+  {
+   "stage": "B",
+   "cid": "B4",
+   "default": false,
+   "seed": 204,
+   "F": 0.0,
+   "lr": 0.00012,
+   "W": 0.018
+  }
+ ]
+}
