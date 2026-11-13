@@ -126,8 +126,8 @@ phase (`prereg_eval.py --split test` for the selected checkpoints, `prereg_refs.
   No choice depended on test: replicates never enter selection, and their configs were fixed by `select` @5d40391.
 - 2026-11-13, replicate test checkpoints. After the 8 replicates finished, `select` was rerun (@3602813). Its
   frontier, best-dev steps and replicate list for the original runs are identical; it adds the replicates' best-dev
-  and last checkpoints (11) to the test list, which `prereg_test.sh` then scored. Two duplicate replicate
-  submissions were cancelled before starting (queue order); they never ran.
+  and last checkpoints (11) to the test list, which `prereg_test.sh` then scored. The first submission of all 8
+  replicates was cancelled before any started and resubmitted behind the test phase; those cancelled runs never ran.
 - 2026-11-13, descriptive addition. The report adds, per replicated config, the 3-seed mean test Brier at each
   seed's best-dev checkpoint with a bootstrap interval over questions against RLCR, and the seed-averaged
   sampled-minus-exact gap per stage. These intervals exclude seed variance.
