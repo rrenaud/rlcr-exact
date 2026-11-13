@@ -95,6 +95,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule);
   <tr><td>Compute</td><td>6.2 GPU-hours on one RTX 4090</td></tr>
 </table>
 <p>Released RLCR is a full fine-tune from base with 16 × 32 rollouts per step; I evaluate it in my own pipeline rather than quote it.</p>
+<p><strong>A note on being GPU-poor.</strong> Everything here ran on a single RTX 4090, so I trained a rank-4 LoRA on half the layers instead of fully fine-tuning a 7B model the way RLCR does. That was a budget constraint, not a design choice, and it likely costs some quality: a small low-rank adapter can express far less than a full update. The exact-vs-sampled comparison is still fair, because both arms use the same adapter. The comparison against RLCR pits a small adapter against a full fine-tune, so a full fine-tune with the exact objective might do better than the numbers here.</p>
 <p><strong>The protocol.</strong> Before running anything I registered the search boxes, a Latin-hypercube draw of 5 configs run under both estimators with the same seed, dev-only checkpoint selection with an eligibility rule (correctness and format no more than 0.02 below the start), and the hypotheses. Test was scored once, only at the checkpoints the rule picked. Each estimator's best config was rerun with two more seeds.</p>
 
 <h2>Lesson 1: calibration can be a small add-on to an RLVR model</h2>
