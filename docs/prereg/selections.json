@@ -290,6 +290,10 @@
   "run-20261103T222844Z-e999f084bb": 700,
   "run-20261103T222845Z-91ed32311f": 800,
   "run-20261103T222845Z-a85c0dd7fa": 1000,
+  "run-20261110T212237Z-3e9453e9de": 800,
+  "run-20261110T212237Z-7656f17798": 800,
+  "run-20261110T212237Z-bdb33349cb": 1000,
+  "run-20261110T212237Z-ef8e0a05f7": 1000,
   "run-20261103T222845Z-3ebfa9f968": 500,
   "run-20261103T222845Z-45a230b057": 400,
   "run-20261103T222845Z-89d08c41e9": 550,
@@ -299,7 +303,11 @@
   "run-20261103T222845Z-c337eaf8f4": 550,
   "run-20261103T222845Z-dbf0c5a301": 600,
   "run-20261103T222845Z-fe31cb2d94": 600,
-  "run-20261103T222846Z-a76e31d4f8": 600
+  "run-20261103T222846Z-a76e31d4f8": 600,
+  "run-20261110T212238Z-0c3962510e": 600,
+  "run-20261110T212238Z-1f9422108a": 600,
+  "run-20261110T212238Z-6b0292e176": 600,
+  "run-20261110T212238Z-905269e6e5": 500
  },
  "replicate": [
   [
@@ -418,6 +426,32 @@
    ]
   },
   {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-A/run-20261110T212237Z-3e9453e9de",
+   "steps": [
+    800,
+    1000
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-A/run-20261110T212237Z-7656f17798",
+   "steps": [
+    800,
+    1000
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-A/run-20261110T212237Z-bdb33349cb",
+   "steps": [
+    1000
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-A/run-20261110T212237Z-ef8e0a05f7",
+   "steps": [
+    1000
+   ]
+  },
+  {
    "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-B/run-20261103T222845Z-3ebfa9f968",
    "steps": [
     500,
@@ -485,6 +519,31 @@
   {
    "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-B/run-20261103T222846Z-a76e31d4f8",
    "steps": [
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-B/run-20261110T212238Z-0c3962510e",
+   "steps": [
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-B/run-20261110T212238Z-1f9422108a",
+   "steps": [
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-B/run-20261110T212238Z-6b0292e176",
+   "steps": [
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-B/run-20261110T212238Z-905269e6e5",
+   "steps": [
+    500,
     600
    ]
   }
