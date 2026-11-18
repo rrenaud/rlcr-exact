@@ -62,16 +62,17 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule);
 <body>
 <main>
 <h1>Calibration as a cheap add-on: what an exact confidence objective buys</h1>
-<div class="byline">Rob Neuhaus · 13 November 2026</div>
+<div class="byline">Rob Neuhaus · 13 November 2026 · updated 18 November 2026</div>
 
 <p>Here is a project I've been hacking on, with an improvement over the state of the art in getting LLMs to state calibrated confidence.</p>
 <p>You want your LLM to give calibrated probabilities, like Jev does. But you don't want to cut off the LM head and turn it into a decision-model API. You want it to keep generating text, and also be calibrated.</p>
 <p>The state of the art, RLCR (Reinforcement Learning with Calibration Rewards) [<a href="#ref1">1</a>] and Rewarding Doubt [<a href="#ref2">2</a>], starts from RL with verifiable rewards (RLVR) and also asks the model to write a numeric confidence after its answer. A proper scoring rule on that confidence against the answer's correctness (squared loss in [1], clipped log loss in [2]) becomes an extra reward term. It works the way you'd expect: confident wrong answers and unconfident right ones are penalized. Correctness itself is still rewarded by the usual RLVR term.</p>
-<p><strong>My improvement: don't treat the confidence as text.</strong> Just before the confidence tokens, the LM head's softmax already holds a distribution over confidences. A text-only approach samples one and throws the rest away. Instead, I compute the exact expected reward under that distribution. That removes the sampling variance and gives a clean, exact reward signal. When a confidence spans several tokens ("10" is two), all the levels are scored at once with a packed token trie and FlexAttention.</p>
+<p><strong>My improvement: don't treat the confidence as text.</strong> Just before the confidence tokens, the LM head's softmax already holds a distribution over confidences. A text-only approach samples one and throws the rest away. Instead, I compute the exact expected reward under that distribution. That removes the variance from sampling the confidence; the answer is still sampled as usual. When a confidence spans several tokens ("10" is two), all the levels are scored at once with a packed token trie and FlexAttention.</p>
+<p>For the stats nerds, this is Rao-Blackwellization. The sampled estimator scores one draw c ~ q(· | a). The exact estimator replaces that score with its conditional expectation given the answer, E[R(a, c) | a] = Σ q(c | a)·R(a, c). The mean is unchanged, and by the law of total variance the variance can only go down.</p>
 <p>To check that it really helps, and isn't just better tuned, I ran a pre-registered sweep on HotpotQA. Both estimators got the same configs, seeds and selection rule, and the finalists got three seeds each. Short version:</p>
 <ul>
   <li><strong>The exact signal trains better calibration.</strong> All three exact seeds beat all three sampled seeds on test; the seed-averaged gap is 0.022 Brier (95% interval 0.012 to 0.032).</li>
-  <li><strong>Calibration can be a cheap add-on to an existing RLVR model.</strong> A rank-4 LoRA on the RLVR model, with its answers held near the start by a KL penalty, matches released RLCR (0.185 vs 0.192 test Brier, 3-seed mean) in 6.2 GPU-hours on one RTX 4090. Answer correctness is unchanged.</li>
+  <li><strong>Calibration can be a cheap add-on to an existing RLVR model.</strong> A rank-4 LoRA on the RLVR model, with its answers held near the start by a KL penalty, matches RLCR (0.185 vs 0.192 test Brier, 3-seed mean; the gap is within noise) in 6.2 GPU-hours on one RTX 4090. Answer correctness is unchanged.</li>
   <li><strong>Recalibrating without training doesn't get you there.</strong> Platt scaling the RLVR model only reaches 0.231 Brier, about the same as always predicting the base rate (0.234); details in the <a href="#platt">appendix</a>.</li>
 </ul>
 
@@ -96,7 +97,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule);
 </table>
 <p>Released RLCR is a full fine-tune from base with 16 × 32 rollouts per step; I evaluate it in my own pipeline rather than quote it.</p>
 <p><strong>A note on being GPU-poor.</strong> Everything here ran on a single RTX 4090, so I trained a rank-4 LoRA on half the layers instead of fully fine-tuning a 7B model the way RLCR does. That was a budget constraint, not a design choice, and it likely costs some quality: a small low-rank adapter can express far less than a full update. The exact-vs-sampled comparison is still fair, because both arms use the same adapter. The comparison against RLCR pits a small adapter against a full fine-tune, so a full fine-tune with the exact objective might do better than the numbers here.</p>
-<p><strong>The protocol.</strong> Before running anything I registered the search boxes, a Latin-hypercube draw of 5 configs run under both estimators with the same seed, dev-only checkpoint selection with an eligibility rule (correctness and format no more than 0.02 below the start), and the hypotheses. Test was scored once, only at the checkpoints the rule picked. Each estimator's best config was rerun with two more seeds.</p>
+<p><strong>The protocol.</strong> Before running anything we registered the search boxes, a Latin-hypercube draw of 5 configs run under both estimators with the same seed, dev-only checkpoint selection with an eligibility rule (correctness and format no more than 0.02 below the start), and the hypotheses. Test was scored once, only at the checkpoints the rule picked. Each estimator's best config was rerun with two more seeds.</p>
 
 <h2>Lesson 1: calibration can be a small add-on to an RLVR model</h2>
 <p>You don't have to redo RL from base to get RLCR-level calibration. Averaged over three seeds, the best exact config reaches test Brier 0.185 against RLCR's 0.192 (difference −0.005, 95% interval −0.021 to +0.011), with AUROC 0.81 against 0.79. That takes 6.2 GPU-hours on one RTX 4090, training a small LoRA with a quarter of RLCR's rollouts per step and no full fine-tune.</p>
@@ -106,23 +107,6 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule);
 <p>Earlier comparisons in this project favored the exact objective, but the exact arm had also been tuned more. So the sweep gave both estimators the same configs, seeds and selection rule.</p>
 <p><strong>Exact wins on test.</strong> In the head-to-head, exact had the lower test Brier at the last checkpoint in 4 of 5 configs. On the finalists, all three exact seeds (0.178 to 0.190) beat all three sampled seeds (0.192 to 0.221). Seed-averaged, sampled is 0.022 worse (95% interval +0.012 to +0.032), and sampled's best config ends 0.017 <em>worse</em> than RLCR.</p>
 <p><strong>Exact is harder to break.</strong> Across all 5 configs, exact's best dev Brier stayed in 0.158 to 0.172. Sampled ranged from 0.178 to 0.249, and in one config it sat at a constant 0.5 confidence for all 600 steps.</p>
-<p>Why does it matter this much? The confidence reward also flows into the answer tokens. With one sampled confidence, a wrong answer's reward swings on a coin flip of which confidence got written. With the exact sum, it reflects the whole distribution. (That is my reading, not something the sweep tested.)</p>
-
-<h2>Things that would have fooled me</h2>
-<ul>
-  <li><strong>Seed luck.</strong> My best single run, exact at test Brier 0.178, looked like it beat RLCR. Its two reruns scored 0.190 and 0.187, so the honest claim is "matches". Sampled's best pick went from 0.192 to 0.208 and 0.221 on reruns.</li>
-  <li><strong>Picking on dev is optimistic.</strong> The selected checkpoints typically lost 0.02 to 0.035 Brier from dev to test; RLCR, which I did not select, lost 0.009.</li>
-  <li><strong>Stalls hit both estimators.</strong> One exact rerun wrote 0.5 on every question for its first ~225 steps before learning. One sampled run never left that state. A run that looks flat at step 200 is not necessarily dead, and a run that recovers can still cost you the early part of the curve.</li>
-</ul>
-
-<h2>Takeaways</h2>
-<ol>
-  <li>Compare against Platt scaling and the constant base rate before claiming calibration gains. Here they set the bar at about 0.23 Brier, and only better ranking clears it.</li>
-  <li>If you already have an RLVR model, a KL-bounded confidence LoRA is a cheap, low-risk way to add calibration: RLCR-level Brier in about 6 GPU-hours on one consumer GPU, with answers unchanged.</li>
-  <li>When the confidence space is small, score it exactly. Computing 11 rewards from one distribution costs little, and it was the difference between matching RLCR and trailing it.</li>
-  <li>Pre-register and rerun seeds. Without the reruns I would have reported a win over RLCR that was mostly one lucky seed.</li>
-</ol>
-<p>Open next: whether the add-on transfers beyond HotpotQA.</p>
 
 <h2>Appendix: the full sweep</h2>
 <p>Every config in the sweep, run once under each estimator with the same seed. The dev view is what the selection rule saw; the test view is the score of that same checkpoint. Hover a point for its step and both scores.</p>
@@ -149,7 +133,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule);
 
 <h2 id="platt">Appendix: the Platt baseline</h2>
 <p>The RLVR model's stated confidence is nearly useless: test Brier 0.596, AUROC 0.52. It says it is sure almost every time, and it is right 45% of the time.</p>
-<p>The obvious fix needs no training: fit a one-feature logistic regression (Platt scaling) on dev and apply it on test. I tried it on the stated confidence and on the answer's mean token probability. Both get Brier down to about 0.23, which sounds like progress until you notice that predicting the dev base rate for every question gets 0.234. Platt fixes the <em>level</em> of confidence, not the <em>ranking</em>: AUROC stays at 0.52 to 0.56, barely above chance.</p>
+<p>The obvious fix needs no training: fit a one-feature logistic regression (Platt scaling) on dev and apply it on test. We tried it on the stated confidence and on the answer's mean token probability. Both get Brier down to about 0.23, which sounds like progress until you notice that predicting the dev base rate for every question gets 0.234. Platt fixes the <em>level</em> of confidence, not the <em>ranking</em>: AUROC stays at 0.52 to 0.56, barely above chance.</p>
 <p>That makes 0.23 the bar a trained method has to clear, and ranking is where it has to clear it. Every trained method in this post clears it, with AUROC around 0.8. Without this baseline, a drop from 0.596 to 0.23 would have looked like a win for any method.</p>
 
 <h2>References</h2>
