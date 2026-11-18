@@ -6,6 +6,9 @@ better than the single sampled confidence RLCR uses?
 - RLCR: Damani et al., *Beyond Binary Rewards*, arXiv 2507.16806, code [damanimehul/RLCR](https://github.com/damanimehul/RLCR).
 - The exact objective comes from [rrenaud/rewarding_doubt](https://github.com/rrenaud/rewarding_doubt).
 
+**Write-up:** [Calibration as a cheap add-on: what an exact confidence objective buys](https://rrenaud.github.io/rlcr-exact/)
+(HotpotQA, pre-registered exact vs sampled sweep).
+
 The full work log is [NOTES.md](NOTES.md), and the online-training design is
 [docs/stage_b_design.md](docs/stage_b_design.md). This page summarises them. Findings are as of 2026-10-25.
 
