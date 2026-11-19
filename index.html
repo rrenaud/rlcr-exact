@@ -77,10 +77,11 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule);
 </ul>
 
 <figure>
-  <div class="ftitle">Training buys ranking: trained models reach AUROC near 0.8, recalibration stays near chance</div>
-  <div class="fsub">HotpotQA test, 500 questions. LoRA points are 3-seed means; lower Brier and higher AUROC are better.</div>
-  <svg id="scatter" role="img" aria-label="Test Brier vs test AUROC for each method"></svg>
-  <figcaption>Pre-registered sweep, test split; LoRA points are 3-seed means at each seed's best-dev checkpoint. The RLVR start as is (Brier 0.596, AUROC 0.52) is off the chart.</figcaption>
+  <div class="ftitle">Exact matches released RLCR; sampled trails both</div>
+  <div class="fsub">HotpotQA test, 500 questions. Lower Brier and higher AUROC are better.</div>
+  <div class="legend"><span><i class="dot" style="background:var(--exact)"></i>LoRA, exact</span><span><i class="dot" style="background:var(--sampled)"></i>LoRA, sampled (k = 1)</span><span><i class="dot" style="background:var(--ref)"></i>released RLCR</span></div>
+  <svg id="hero" role="img" aria-label="Test Brier vs test AUROC for exact, sampled and RLCR, with seeds and 95% intervals"></svg>
+  <figcaption>Large dots: 3-seed means at each seed's best-dev checkpoint (RLCR: mean of 3 resampled generations). Small dots: the individual seeds (RLCR: the individual generations). Whiskers: 95% bootstrap interval over the 500 test questions. All three share the same questions, so differences between them are tighter than the separate whiskers suggest: paired, sampled is 0.022 Brier worse than exact (95% interval 0.012 to 0.032).</figcaption>
 </figure>
 
 <h2>The setup</h2>
@@ -134,6 +135,12 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule);
 <h2 id="platt">Appendix: the Platt baseline</h2>
 <p>The RLVR model's stated confidence is nearly useless: test Brier 0.596, AUROC 0.52. It says it is sure almost every time, and it is right 45% of the time.</p>
 <p>The obvious fix needs no training: fit a one-feature logistic regression (Platt scaling) on dev and apply it on test. I tried it on the stated confidence and on the answer's mean token probability. Both get Brier down to about 0.23, which sounds like progress until you notice that predicting the dev base rate for every question gets 0.234. Platt fixes the <em>level</em> of confidence, not the <em>ranking</em>: AUROC stays at 0.52 to 0.56, barely above chance.</p>
+<figure>
+  <div class="ftitle">Training buys ranking: trained models reach AUROC near 0.8, recalibration stays near chance</div>
+  <div class="fsub">HotpotQA test, 500 questions. Lower Brier and higher AUROC are better.</div>
+  <svg id="scatter" role="img" aria-label="Test Brier vs test AUROC for each method, including Platt baselines"></svg>
+  <figcaption>LoRA points are 3-seed means at each seed's best-dev checkpoint. The RLVR start as is (Brier 0.596, AUROC 0.52) is off the chart.</figcaption>
+</figure>
 <p>That makes 0.23 the bar a trained method has to clear, and ranking is where it has to clear it. Every trained method in this post clears it, with AUROC around 0.8. Without this baseline, a drop from 0.596 to 0.23 would have looked like a win for any method.</p>
 
 <h2>References</h2>
@@ -161,7 +168,7 @@ const runOf = (cid, arm) => D.runs.find(r => r.cid === cid && r.arm === arm);
 const bestOf = r => r.pts.find(p => p.step === r.best);
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 
-// Hero: test Brier vs test AUROC, one point per method (LoRA points are 3-seed means)
+// Platt appendix: test Brier vs test AUROC, one point per method (LoRA points are 3-seed means)
 const METHODS = [
   { name: "LoRA, exact", kind: "exact", brier: 0.185, auroc: 0.808, dx: -10, dy: -8, anchor: "end" },
   { name: "Released RLCR", kind: "ref", brier: 0.192, auroc: 0.787, dx: -10, dy: 18, anchor: "end" },
@@ -190,6 +197,45 @@ function scatter() {
     const t = txt(svg, x(p.brier) + p.dx, y(p.auroc) + p.dy, p.name, { "text-anchor": p.anchor });
     if (p.kind === "exact") t.setAttribute("style", "fill: var(--fg); font-weight: 600");
     hover(el("circle", { cx: x(p.brier), cy: y(p.auroc), r: 12, fill: "transparent" }, svg), `<b>${p.name}</b><br>test Brier ${f3(p.brier)} · AUROC ${f3(p.auroc)}`);
+  }
+}
+
+// Hero: exact vs sampled vs RLCR, with per-seed points and 95% test-question bootstrap intervals
+const HERO = [
+  { name: "LoRA, exact", kind: "exact", brier: 0.1851, auroc: 0.8077, bci: [0.1667, 0.2026], aci: [0.7751, 0.8409], seeds: [[0.1779, 0.8181], [0.1901, 0.794], [0.1872, 0.8109]], unit: "seed" },
+  { name: "Released RLCR", kind: "ref", brier: 0.1922, auroc: 0.7868, bci: [0.1773, 0.2068], aci: [0.7504, 0.8226], seeds: [[0.19, 0.79], [0.191, 0.7922], [0.1957, 0.7781]], unit: "generation" },
+  { name: "LoRA, sampled", kind: "sampled", brier: 0.2068, auroc: 0.767, bci: [0.1873, 0.2249], aci: [0.7319, 0.8046], seeds: [[0.1917, 0.7714], [0.2081, 0.7682], [0.2206, 0.7614]], unit: "seed" },
+];
+function hero() {
+  const svg = document.getElementById("hero"), W = 720, H = 400, m = { l: 48, r: 16, t: 24, b: 44 };
+  svg.innerHTML = ""; svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const xl = 0.16, xh = 0.235, yl = 0.72, yh = 0.85;
+  const x = v => m.l + (v - xl) / (xh - xl) * (W - m.l - m.r), y = v => H - m.b - (v - yl) / (yh - yl) * (H - m.t - m.b);
+  for (const t of [0.74, 0.76, 0.78, 0.8, 0.82, 0.84]) { el("line", { x1: m.l, x2: W - m.r, y1: y(t), y2: y(t), class: "gridl" }, svg); txt(svg, m.l - 8, y(t) + 4, t.toFixed(2), { "text-anchor": "end" }); }
+  for (const t of [0.17, 0.18, 0.19, 0.2, 0.21, 0.22, 0.23]) txt(svg, x(t), H - m.b + 18, t.toFixed(2), { "text-anchor": "middle" });
+  el("line", { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, class: "axis" }, svg);
+  txt(svg, (m.l + W - m.r) / 2, H - 6, "← test Brier (lower is better)", { "text-anchor": "middle" });
+  txt(svg, 0, 12, "↑ test AUROC (higher is better)");
+  const fill = k => k === "exact" ? css("--exact") : k === "sampled" ? css("--sampled") : css("--ref");
+  for (const p of HERO) {
+    const c = fill(p.kind), g = el("g", { stroke: c, "stroke-width": 1.5, opacity: 0.55 }, svg);
+    el("line", { x1: x(p.bci[0]), x2: x(p.bci[1]), y1: y(p.auroc), y2: y(p.auroc) }, g);
+    el("line", { x1: x(p.brier), x2: x(p.brier), y1: y(p.aci[0]), y2: y(p.aci[1]) }, g);
+    for (const [v, w] of [[p.bci[0], 0], [p.bci[1], 0]]) el("line", { x1: x(v), x2: x(v), y1: y(p.auroc) - 4, y2: y(p.auroc) + 4 }, g);
+    for (const v of p.aci) el("line", { x1: x(p.brier) - 4, x2: x(p.brier) + 4, y1: y(v), y2: y(v) }, g);
+  }
+  for (const p of HERO) {
+    const c = fill(p.kind);
+    p.seeds.forEach(([b, a], i) => {
+      el("line", { x1: x(p.brier), y1: y(p.auroc), x2: x(b), y2: y(a), stroke: c, "stroke-width": 1, opacity: 0.5 }, svg);
+      el("circle", { cx: x(b), cy: y(a), r: 3.5, fill: css("--surface"), stroke: c, "stroke-width": 1.5 }, svg);
+      hover(el("circle", { cx: x(b), cy: y(a), r: 9, fill: "transparent" }, svg), `<b>${p.name}</b>, ${p.unit} ${i + 1}<br>test Brier ${f3(b)} · AUROC ${f3(a)}`);
+    });
+  }
+  for (const p of HERO) {
+    el("circle", { cx: x(p.brier), cy: y(p.auroc), r: 7, fill: fill(p.kind), stroke: css("--surface"), "stroke-width": 2 }, svg);
+    txt(svg, x(p.brier) + 8, y(p.aci[1]) + 4, p.name, { style: "fill: var(--fg); font-weight: 600" });  // label at the top whisker cap, clear of the seeds
+    hover(el("circle", { cx: x(p.brier), cy: y(p.auroc), r: 13, fill: "transparent" }, svg), `<b>${p.name}</b>, 3-${p.unit} mean<br>test Brier ${f3(p.brier)} [${f3(p.bci[0])}, ${f3(p.bci[1])}]<br>AUROC ${f3(p.auroc)} [${f3(p.aci[0])}, ${f3(p.aci[1])}]`);
   }
 }
 
@@ -266,7 +312,7 @@ for (const c of D.cfg) {
   const b = document.createElement("button"); b.type = "button"; b.dataset.cid = c.cid; b.textContent = c.cid;
   b.onclick = () => { current = c.cid; curves(); }; document.getElementById("cfgPick").appendChild(b);
 }
-function draw() { scatter(); pairs(); curves(); }
+function draw() { hero(); scatter(); pairs(); curves(); }
 draw();
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
 </script>
