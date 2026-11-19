@@ -87,7 +87,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule);
 <p>I build on RLCR [1], whose model ends each answer with <code>&lt;confidence&gt;c&lt;/confidence&gt;</code> and is rewarded with</p>
 <p class="formula">R(a, c) = 0.5 · format + 0.5 · correct + 0.5 · (1 − (c − y)²)</p>
 <p>where y is 1 if the answer is right. The confidence is one of 11 strings, 0.0 to 1.0.</p>
-<p><strong>Sampled vs exact, concretely.</strong> Write q(c | a) for the model's distribution over the 11 confidences after answer a. The sampled arm is RLCR's estimator: draw one c and score it. The exact arm scores all 11 and weights them by q. The confidence tokens get the exact expected-reward gradient, and the answer tokens see Σ q(c)·R(a, c) instead of one noisy draw. Same trainer, same seed, same questions; only the estimator differs.</p>
+<p><strong>Sampled vs exact, concretely.</strong> Write q(c | a) for the model's distribution over the 11 confidences after a, the completion up to the confidence (reasoning, answer and analysis). The sampled arm is RLCR's estimator: draw one c and score it. The exact arm scores all 11 and weights them by q. The confidence tokens get the exact expected-reward gradient, and the answer tokens see Σ q(c)·R(a, c) instead of one noisy draw. Same trainer, same seed, same questions; only the estimator differs.</p>
 <p><strong>Training.</strong> I start from the released RLVR model (<code>hotpot-v2-correctness-7b</code>, Qwen2.5-7B) and train a rank-4 LoRA on layers 14 to 27 with GRPO, plus a KL penalty that keeps the answers near the RLVR model's.</p>
 <table>
   <tr><td>Data</td><td>4,000 HotpotQA training questions</td></tr>
