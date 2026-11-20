@@ -1,0 +1,55 @@
+{
+ "rng_seed": 20261119,
+ "start": "mehuldamani/hotpot-v2-brier-7b-no-split",
+ "arms": [
+  "exact",
+  "sampled"
+ ],
+ "configs": [
+  {
+   "stage": "C",
+   "cid": "C0",
+   "default": true,
+   "seed": 300,
+   "lr": 0.00024,
+   "W": 0.0054,
+   "F": 0.0
+  },
+  {
+   "stage": "C",
+   "cid": "C1",
+   "default": false,
+   "seed": 301,
+   "F": 0.0,
+   "lr": 0.00023,
+   "W": 0.038
+  },
+  {
+   "stage": "C",
+   "cid": "C2",
+   "default": false,
+   "seed": 302,
+   "F": 0.0,
+   "lr": 0.00019,
+   "W": 0.048
+  },
+  {
+   "stage": "C",
+   "cid": "C3",
+   "default": false,
+   "seed": 303,
+   "F": 0.0,
+   "lr": 2.8e-05,
+   "W": 0.0072
+  },
+  {
+   "stage": "C",
+   "cid": "C4",
+   "default": false,
+   "seed": 304,
+   "F": 0.0,
+   "lr": 8.1e-05,
+   "W": 0.014
+  }
+ ]
+}
