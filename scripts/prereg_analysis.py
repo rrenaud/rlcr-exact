@@ -3,6 +3,8 @@
   prereg_analysis.py select   dev only: eligibility, frontiers, paired steps; writes docs/prereg/selections.json, the
                               (run, step) pairs whose test split the rule says to score, grouped per run for prereg_eval.py
   prereg_analysis.py report   adds the test scores of exactly those checkpoints: frontier tables, H1-H3, references
+  prereg_analysis.py select-c Stage C (docs/prereg_rlcr_init.md): the same dev-only rule against released RLCR, writes
+                              docs/prereg_rlcr_init/selections.json
 
 Inputs: the runs of gpuq experiments rlcr-prereg-A / -B (description "prereg@REV CID ARM"): their checkpoint events
 (compute_s per registered step) and prereg_eval/{dev,test}_stepN.json; the reference panel (rlcr-prereg-ref).
@@ -22,9 +24,9 @@ RLCR = "hotpot-v2-brier-7b-no-split"
 RLVR = "hotpot-v2-correctness-7b"
 
 
-def load_runs(root):
+def load_runs(root, stages="AB"):
     runs = []
-    for stage in "AB":
+    for stage in stages:
         for d in sorted(glob.glob(os.path.join(root, f"rlcr-prereg-{stage}", "run-*"))):
             m = json.load(open(os.path.join(d, "manifest.json")))
             hit = re.match(r"prereg@(\S+) (\S+) (exact|sampled)$", m["description"])
@@ -102,6 +104,30 @@ def select(runs, refs):
     sel = dict(base_dev=base, frontier=frontier, best_dev_step=best, replicate=replicate,
                test=[dict(run_dir=d, steps=sorted(s)) for d, s in sorted(picks.items())])
     return sel
+
+
+def select_c(runs, refs):
+    """Stage C (docs/prereg_rlcr_init.md), dev only: eligibility against released RLCR; per arm the config whose best
+    eligible dev checkpoint has the lowest dev Brier; per run its best eligible and last checkpoints go to test;
+    the selected config of each arm gets 2 replicate seeds."""
+    base = {k: mean([m[k] for m in refs[RLCR]["dev"]]) for k in ("em", "format_ok")}
+    picks, best, chosen = collections.defaultdict(set), {}, {}
+    for r in runs:
+        if not r["evals"]:
+            continue
+        last = max(r["gpu_h"]) if r["gpu_h"] else None
+        if last is not None and "dev" in r["evals"].get(last, {}):
+            picks[r["dir"]].add(last)
+        mine = [p for p in points([r], base) if p["eligible"]]
+        if mine:
+            p = min(mine, key=lambda p: p["dev"]["brier"])
+            picks[r["dir"]].add(p["step"])
+            best[r["run"]] = dict(cid=r["cid"], arm=r["arm"], step=p["step"], dev_brier=p["dev"]["brier"])
+            if not r["replicate"] and (r["arm"] not in chosen or p["dev"]["brier"] < chosen[r["arm"]]["dev_brier"]):
+                chosen[r["arm"]] = dict(cid=r["cid"], run=r["run"], step=p["step"], dev_brier=p["dev"]["brier"])
+    return dict(base_dev=base, selected=chosen, best_dev_step=best,
+                replicate=sorted((c["cid"], arm) for arm, c in chosen.items()),
+                test=[dict(run_dir=d, steps=sorted(s)) for d, s in sorted(picks.items())])
 
 
 def paired(runs, stage, step, split):
@@ -253,13 +279,21 @@ def report(runs, refs, sel):
 def main():
     global ROOT
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["select", "report"])
+    ap.add_argument("phase", choices=["select", "report", "select-c"])
     ap.add_argument("--root", default=ROOT)
     ap.add_argument("--out", default=OUT)
     args = ap.parse_args()
     ROOT = args.root
-    runs, refs = load_runs(args.root), load_refs(args.root)
+    runs, refs = load_runs(args.root, "C" if args.phase == "select-c" else "AB"), load_refs(args.root)
     print(f"{len(runs)} runs, reference models: {sorted(refs)}")
+    if args.phase == "select-c":
+        path = os.path.join(args.out if args.out != OUT else OUT + "_rlcr_init", "selections.json")
+        sel = select_c(runs, refs)
+        json.dump(sel, open(path, "w"), indent=1)
+        print(f"wrote {path}: selected {sel['selected']}, {sum(len(t['steps']) for t in sel['test'])} test checkpoints")
+        for t in sel["test"]:
+            print(t["run_dir"], ",".join(map(str, t["steps"])))
+        return
     path = os.path.join(args.out, "selections.json")
     if args.phase == "select":
         sel = select(runs, refs)
