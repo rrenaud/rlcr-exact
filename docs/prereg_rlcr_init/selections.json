@@ -1,0 +1,162 @@
+{
+ "base_dev": {
+  "em": 0.5046666666666667,
+  "format_ok": 1.0
+ },
+ "selected": {
+  "sampled": {
+   "cid": "C0",
+   "run": "run-20261120T170849Z-00d95c574b",
+   "step": 350,
+   "dev_brier": 0.17048000000000002
+  },
+  "exact": {
+   "cid": "C0",
+   "run": "run-20261120T170849Z-390db7df09",
+   "step": 550,
+   "dev_brier": 0.16412000000000002
+  }
+ },
+ "best_dev_step": {
+  "run-20261120T170849Z-00d95c574b": {
+   "cid": "C0",
+   "arm": "sampled",
+   "step": 350,
+   "dev_brier": 0.17048000000000002
+  },
+  "run-20261120T170849Z-0cf67d36ee": {
+   "cid": "C2",
+   "arm": "exact",
+   "step": 500,
+   "dev_brier": 0.17310000000000003
+  },
+  "run-20261120T170849Z-390db7df09": {
+   "cid": "C0",
+   "arm": "exact",
+   "step": 550,
+   "dev_brier": 0.16412000000000002
+  },
+  "run-20261120T170849Z-3dacc500e7": {
+   "cid": "C2",
+   "arm": "sampled",
+   "step": 500,
+   "dev_brier": 0.17918
+  },
+  "run-20261120T170849Z-479f68005d": {
+   "cid": "C1",
+   "arm": "sampled",
+   "step": 500,
+   "dev_brier": 0.17914
+  },
+  "run-20261120T170849Z-96202e892a": {
+   "cid": "C1",
+   "arm": "exact",
+   "step": 600,
+   "dev_brier": 0.17134
+  },
+  "run-20261120T170850Z-1e7457639a": {
+   "cid": "C4",
+   "arm": "sampled",
+   "step": 550,
+   "dev_brier": 0.1785
+  },
+  "run-20261120T170850Z-4fc88f87d0": {
+   "cid": "C3",
+   "arm": "exact",
+   "step": 500,
+   "dev_brier": 0.17846000000000004
+  },
+  "run-20261120T170850Z-5b407bb3a6": {
+   "cid": "C3",
+   "arm": "sampled",
+   "step": 600,
+   "dev_brier": 0.17602
+  },
+  "run-20261120T170850Z-729b5cf52f": {
+   "cid": "C4",
+   "arm": "exact",
+   "step": 550,
+   "dev_brier": 0.174
+  }
+ },
+ "replicate": [
+  [
+   "C0",
+   "exact"
+  ],
+  [
+   "C0",
+   "sampled"
+  ]
+ ],
+ "test": [
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-C/run-20261120T170849Z-00d95c574b",
+   "steps": [
+    350,
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-C/run-20261120T170849Z-0cf67d36ee",
+   "steps": [
+    500,
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-C/run-20261120T170849Z-390db7df09",
+   "steps": [
+    550,
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-C/run-20261120T170849Z-3dacc500e7",
+   "steps": [
+    500,
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-C/run-20261120T170849Z-479f68005d",
+   "steps": [
+    500,
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-C/run-20261120T170849Z-96202e892a",
+   "steps": [
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-C/run-20261120T170850Z-1e7457639a",
+   "steps": [
+    550,
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-C/run-20261120T170850Z-4fc88f87d0",
+   "steps": [
+    500,
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-C/run-20261120T170850Z-5b407bb3a6",
+   "steps": [
+    600
+   ]
+  },
+  {
+   "run_dir": "/data/gpuq-runs/rrenaud/rlcr-prereg-C/run-20261120T170850Z-729b5cf52f",
+   "steps": [
+    550,
+    600
+   ]
+  }
+ ]
+}
