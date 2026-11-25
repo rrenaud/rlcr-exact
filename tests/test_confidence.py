@@ -3,7 +3,7 @@ import os
 import pytest
 import torch
 
-from rlcr_exact.confidence import level_matrix, rlcr11_candidates, rlcr11_math_candidates
+from rlcr_exact.confidence import level_matrix, rlcr11_candidates, rlcr11_math_candidates, rlcr21_candidates
 
 
 @pytest.fixture(scope="module")
@@ -25,6 +25,18 @@ def test_rlcr11_is_the_levels_in_the_models_spelling(tok):
         # the trie path is how the tokenizer spells the text after "<confidence>", ending in the checkpoint's eos
         assert ids == tok(s, add_special_tokens=False).input_ids
         assert ids[-1] == tok.convert_tokens_to_ids("<|endoftext|>") == 151643
+
+
+def test_rlcr21_is_the_half_tenths_in_the_models_spelling(tok):
+    c = rlcr21_candidates(tok)
+    assert len(c.strings) == 21 and len(c.trie.tokens) == 110
+    assert torch.equal(level_matrix(c.values, 21), torch.eye(21))  # one candidate per level, 0.0, 0.05, ..., 1.0
+    assert c.strings[15] == " 0.75 </confidence><|endoftext|>"  # RLCR's own spelling, not 0.70 / .75
+    for s, path in zip(c.strings, c.trie.leaf_paths):
+        assert [c.trie.tokens[n] for n in path] == tok(s, add_special_tokens=False).input_ids
+    eleven = rlcr11_candidates(tok)  # rlcr11's paths are a sub-trie: same tokens to each 0.d level
+    assert {tuple(eleven.trie.tokens[n] for n in p) for p in eleven.trie.leaf_paths} <= {
+        tuple(c.trie.tokens[n] for n in p) for p in c.trie.leaf_paths}
 
 
 def test_rlcr11_math_spells_each_level_twice():

@@ -16,12 +16,12 @@ from train_frozen import STOP_SCORERS, evaluate, load_rows, make_scorer, make_to
 
 ap = argparse.ArgumentParser()
 ap.add_argument("rollouts")
-ap.add_argument("--scorer", required=True, choices=["digit", "trie", "hotpot", "hotpot-stop", "rlcr11"])
+ap.add_argument("--scorer", required=True, choices=["digit", "trie", "hotpot", "hotpot-stop", "rlcr11", "rlcr21"])
 ap.add_argument("--model", default=None)
 ap.add_argument("--rows", type=int, default=500)
 ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
 a = ap.parse_args()
-a.model = a.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if a.scorer.startswith("hotpot") or a.scorer == "rlcr11"
+a.model = a.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if a.scorer.startswith("hotpot") or a.scorer in ("rlcr11", "rlcr21")
                       else "mehuldamani/big-math-digits-v2-brier-base-tabc")
 
 tok = AutoTokenizer.from_pretrained(a.model)
@@ -53,7 +53,7 @@ seconds = (time.time() - t) / len(rows)
 report = dict(scorer=a.scorer, model=a.model, rows=len(rows), **info, greedy_matches_vllm=agree / len(rows),
               mass_mean=sum(mass) / len(mass), mass_min=min(mass), tail_fault_rows=len(mass_fault),
               mass_mean_tail_fault=sum(mass_fault) / len(mass_fault) if mass_fault else None, seconds_per_row=round(seconds, 4),
-              eval=evaluate(model, rows, values, score, 1))
+              eval=evaluate(model, rows, values, score, 1, n_levels=info.get("levels", 11)))
 print(json.dumps(report, indent=1), flush=True)
 with open(os.path.join(a.out, f"check_scorer_{a.scorer}.json"), "w") as f:
     json.dump(report, f, indent=1)

@@ -96,6 +96,22 @@ def rlcr11_candidates(tokenizer) -> Candidates:
                       build_trie(seqs))
 
 
+def rlcr21_candidates(tokenizer) -> Candidates:
+    """rlcr11 at 0.05 steps: 0.0, 0.05, 0.1, ..., 0.95, 1.0 in RLCR-hotpot's own spelling (one decimal, or two when the
+    second is 5, as it writes 0.75), spaced and through the stop: `Ġ` `0` `.` `7` [`5`] `Ġ</` `confidence` `>`
+    `<|endoftext|>`. After `Ġ0.d` one softmax picks `Ġ</` (0.d) or `5` (0.d5), so each value's stop is scored on its
+    own path. Everything else (0.70, 0.33, unspaced, a junk tail) is off the list and earns 0. 21 candidates, 110 nodes.
+    """
+    tid = tokenizer.convert_tokens_to_ids
+    texts = [f"0.{d}{h}" for d in range(10) for h in ("", "5")] + ["1.0"]
+    tail = [tid("Ġ</"), tid("confidence"), tid(">"), tid("<|endoftext|>")]
+    seqs = [[tid("Ġ")] + [tid(c) for c in t] + tail for t in texts]
+    for t, s in zip(texts, seqs):  # each character is its own token, and the spaced string tokenizes to exactly this
+        assert tokenizer(f" {t} </confidence>", add_special_tokens=False).input_ids == s[:-1], t
+    return Candidates([f" {t} </confidence><|endoftext|>" for t in texts], torch.tensor([float(t) for t in texts]),
+                      build_trie(seqs))
+
+
 def rlcr11_math_candidates(tokenizer) -> Candidates:
     """rlcr11 for RLVR-math's newline spelling. The prefix ends at `confidence` (cut_point drops the straddling `>\\n`):
     `>\\n` `0` `.` `7` `\\n` `</` `confidence`, then the close `>` or the merged `>\\n` (the model's usual; RLCR's
@@ -133,7 +149,8 @@ def rlcr_reward(values: torch.Tensor, correct: torch.Tensor) -> torch.Tensor:
 
 
 def level_matrix(values: torch.Tensor, levels: int = 11) -> torch.Tensor:
-    """[levels, K] 0/1: which candidates spell each of 0.0, 0.1, ..., 1.0 (all spellings of a value count)."""
+    """[levels, K] 0/1: which candidates spell each of 0.0, 0.1, ..., 1.0 (levels = 21: 0.0, 0.05, ..., 1.0; all
+    spellings of a value count, values off the grid belong to no level)."""
     grid = torch.linspace(0, 1, levels, dtype=values.dtype, device=values.device)
     return ((values[None, :] - grid[:, None]).abs() < 1e-6).to(values.dtype)
 

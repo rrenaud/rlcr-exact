@@ -46,7 +46,7 @@ from sklearn.metrics import roc_auc_score
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from rlcr_exact.confidence import PRIOR_INSTRUCTION, correctness_target, prior_candidates, exact_objective, format_loss, level_ce, rps_objective, hotpot_candidates, hotpot_stop_candidates, level_matrix, make_candidates, rlcr11_candidates, rlcr11_math_candidates, rlcr_reward, support_floor
+from rlcr_exact.confidence import PRIOR_INSTRUCTION, correctness_target, prior_candidates, exact_objective, format_loss, level_ce, rps_objective, hotpot_candidates, hotpot_stop_candidates, level_matrix, make_candidates, rlcr11_candidates, rlcr11_math_candidates, rlcr21_candidates, rlcr_reward, support_floor
 from rlcr_exact.digit_score import LEVELS, DigitIds, level_logps
 from rlcr_exact.grading import agreement, em_correct, f1_correct, tail_only_failure
 from rlcr_exact.trie_score import packed_candidate_logps
@@ -60,7 +60,7 @@ LINEAR_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"
 
 # A training row: one cached rollout, cut after "<confidence>". j is the output's index within its question.
 # correct is RLCR's label (exact match for HotpotQA), which training uses; correct_f1 (F1 >= 0.5) is reported.
-STOP_SCORERS = ("hotpot-stop", "rlcr11")  # score through the end token, so tail-fault rows are kept (earn 0 off-list)
+STOP_SCORERS = ("hotpot-stop", "rlcr11", "rlcr21")  # score through the end token, so tail-fault rows are kept (earn 0 off-list)
 Row = collections.namedtuple("Row", "qid prefix correct start j correct_f1 agree", defaults=(None,))  # agree: (k, m), grading.agreement
 
 
@@ -109,14 +109,21 @@ def make_scorer(name, tok):
             return level_logps(model, prefixes, ids, greedy, hidden)
         return LEVELS, score, dict(levels=len(LEVELS))
     cands = (hotpot_candidates(tok) if name == "hotpot" else hotpot_stop_candidates(tok) if name == "hotpot-stop"
-             else rlcr11_candidates(tok) if name == "rlcr11" else rlcr11_math_candidates(tok) if name == "rlcr11-math"
+             else rlcr11_candidates(tok) if name == "rlcr11" else rlcr21_candidates(tok) if name == "rlcr21"
+             else rlcr11_math_candidates(tok) if name == "rlcr11-math"
              else make_candidates(tok))
 
     def score(model, prefixes, greedy=False, hidden=False, temperature=None):
         # One packed forward: the rows' common start (a question's prompt, shared by its rollouts) runs once.
         # temperature=T appends the candidates' logps with every token sampled at T (for --policy-temperature).
         return packed_candidate_logps(model, prefixes, cands.trie, greedy=greedy, hidden=hidden, temperature=temperature)
-    return cands.values, score, dict(candidates=len(cands.strings), trie_nodes=len(cands.trie.tokens))
+    return cands.values, score, dict(candidates=len(cands.strings), trie_nodes=len(cands.trie.tokens), levels=scorer_levels(name))
+
+
+def scorer_levels(name):
+    """Confidence levels of a scorer's grid (support floor, level marginals, q log): 0.0, 0.05, ..., 1.0 for rlcr21,
+    else 0.0, 0.1, ..., 1.0 (other scorers' off-grid values, e.g. hotpot's 0.d5, belong to no level)."""
+    return 21 if name == "rlcr21" else 11
 
 
 def chunks(xs, n):
@@ -306,11 +313,11 @@ def adam_fraction(opt):
 
 
 @torch.no_grad()
-def evaluate(model, rows, values, score, batch, drift_rows=()):
+def evaluate(model, rows, values, score, batch, drift_rows=(), n_levels=11):
     """Dev metrics; with drift_rows, also their answer KL (per completion and per token).
 
     Support-floor diagnostics, on each row's level distribution p (level marginals renormalized over the list):
-    entropy (nats; ln 11 = 2.40 is uniform), the mean p per level (all / correct / wrong rows), the spread cost
+    entropy (nats; ln 11 = 2.40 is uniform; ln 21 = 3.04 for rlcr21), the mean p per level (all / correct / wrong rows), the spread cost
     (reward of p's top level minus p's expected reward: what the spread gives up), and both terms' ascent gradients
     in level-logit space, treating p as a softmax over the 11 levels: objective p_l (R_l - sum p R), floor (beta = 1)
     1/L - p_l. Their norm ratio times beta is what the floor weighs against the objective there; cos < 0 means the
@@ -318,7 +325,7 @@ def evaluate(model, rows, values, score, batch, drift_rows=()):
     model.eval()
     greedy, expected, mass, y, y_f1, level_min = [], [], [], [], [], []
     ent, level_p, spread_cost, g_obj, g_floor, g_cos = [], [], [], [], [], []
-    levels = level_matrix(values)
+    levels = level_matrix(values, n_levels)
     grid = torch.linspace(0, 1, levels.shape[0], dtype=values.dtype)
     for part in chunks(rows, batch):
         logps, picks = score(model, [r[1] for r in part], greedy=True)
@@ -421,10 +428,11 @@ def main():
     ap.add_argument("--format-weight", type=float, default=1.0, help="rps: weight of the format term -log(listed mass + eps)")
     ap.add_argument("--format-eps", type=float, default=0.0,
                     help="rps: eps in the format term (0 = the log; larger softens it toward linear 1 - mass at low mass)")
-    ap.add_argument("--scorer", choices=["digit", "trie", "hotpot", "hotpot-stop", "rlcr11", "rlcr11-math"], default="digit",
+    ap.add_argument("--scorer", choices=["digit", "trie", "hotpot", "hotpot-stop", "rlcr11", "rlcr21", "rlcr11-math"], default="digit",
                     help="hotpot-stop: the hotpot candidates through `confidence>` + end token, and rows whose only fault is the "
                          "tail after </confidence> are kept (needs a reference cache built with ref_topk.py --tail-ok); rlcr11: only "
-                         "0.0 .. 1.0 in the spaced spelling, each through the end token, same rows as hotpot-stop; rlcr11-math: "
+                         "0.0 .. 1.0 in the spaced spelling, each through the end token, same rows as hotpot-stop; rlcr21: rlcr11 at 0.05 "
+                         "steps (0.75 spelled as RLCR writes it); rlcr11-math: "
                          "0.0 .. 1.0 in RLVR-math's newline spelling, closed by > or >\\n, then <|endoftext|>")
     ap.add_argument("--part-tokens", type=int, default=2500,
                     help="with --answer-pg and --micro-batch below the group size: also cap each part's completion tokens "
@@ -524,10 +532,10 @@ def main():
                          "and malformed rollouts earn 0, and both terms share the group baseline over all rollouts)")
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     ap.add_argument("--no-log-q", action="store_true",
-                    help="skip q_<run>.jsonl.gz: every training rollout's confidence distribution over the 11 levels at each step (before the update), with its label, expected reward and Var_q[R]")
+                    help="skip q_<run>.jsonl.gz: every training rollout's confidence distribution over the levels (11, or 21 for rlcr21) at each step (before the update), with its label, expected reward and Var_q[R]")
     args = ap.parse_args()
-    packed = args.scorer in ("trie", "hotpot", "hotpot-stop", "rlcr11", "rlcr11-math")
-    args.model = args.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if args.scorer.startswith("hotpot") or args.scorer == "rlcr11"
+    packed = args.scorer in ("trie", "hotpot", "hotpot-stop", "rlcr11", "rlcr21", "rlcr11-math")
+    args.model = args.model or ("mehuldamani/hotpot-v2-brier-7b-no-split" if args.scorer.startswith("hotpot") or args.scorer in ("rlcr11", "rlcr21")
                                 else "mehuldamani/big-math-digits-v2-correctness" if args.scorer == "rlcr11-math"
                                 else "mehuldamani/big-math-digits-v2-brier-base-tabc")
     random.seed(args.seed); torch.manual_seed(args.seed)
@@ -650,9 +658,10 @@ def main():
         return dict(prior_mass=mass.mean().item(), prior_entropy=-(pn * pn.clamp_min(1e-12).log()).sum(-1).mean().item(),
                     prior_expected_mean=float(c.mean()), prior_expected_brier=float(np.mean((c - y) ** 2)),
                     prior_expected_auroc=roc_auc_score(y, c) if 0 < y.mean() < 1 else float("nan"))
-    evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch) | prior_eval(rows)
+    evaluate_on = lambda rows: evaluate(model, rows, values, score, args.eval_batch, n_levels=n_levels) | prior_eval(rows)
     values_gpu = values.cuda()
-    levels_gpu = level_matrix(values_gpu)
+    n_levels = scorer_levels(args.scorer)
+    levels_gpu = level_matrix(values_gpu, n_levels)
     ref_topk = RefTopk(args.ref_topk) if args.ref_topk and not args.refresh_every else None
     if args.refresh_every or args.gen_dev_every:
         assert llm is not None, "--refresh-every and --gen-dev-every need --backend vllm"
@@ -693,7 +702,7 @@ def main():
     def evaluate_dev():
         if args.train_problems:
             log(event="eval", step=step, split="train", **evaluate_on(train))
-        return evaluate(model, dev, values, score, args.eval_batch, drift_rows) | prior_eval(dev)
+        return evaluate(model, dev, values, score, args.eval_batch, drift_rows, n_levels) | prior_eval(dev)
     step = 0
     if not args.skip_initial_eval and not resuming:
         log(event="eval", step=0, split="dev", **evaluate_dev())
