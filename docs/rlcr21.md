@@ -73,6 +73,35 @@ Rules for new guesses, fixed in advance (noise floor for the paired gap unknown;
 
 Cost ~0.9 GPU-h for the two probes. All runs at normal priority, gated on the smoke (`scripts/after_ok.sh`).
 
+### Results (2026-11-25; smoke b2ca238df3, probes dba390183b / 00c01294ee, A2 b650f0b60e; all exit 0)
+
+Smoke, untrained, on cached dev rows (300): **list mass** with rlcr21 vs rlcr11 is 0.45 vs 0.25 on RLVR, 0.95 vs 0.78 on
+released RLCR. Greedy-scorer agreement with vLLM's text on RLCR is 0.95 vs 0.85 (its 0.x5 writes are now on the list).
+
+Paired with rlcr11 at the same config and seed (dev, greedy generation; "prog" = pre-update calibration of training
+rows, mean over a step window):
+
+| config | dev Brier @200, 21 / 11 | prog argmax Brier 100-200, 21 / 11 | half-step share @200 | step time |
+|---|---|---|---|---|
+| A1 (lr 1e-4) | 0.220 / 0.220 | 0.218 / 0.222 | 0.86 | +15% |
+| A2 (lr 1.6e-4) | 0.228 / 0.228 | 0.228 / 0.224 | 0.62 | +14% |
+| A0 (lr 3.7e-4) | 0.185 / 0.187 | 0.218 / 0.221 | 0.81 | +13% |
+
+- **T1 holds.** Every gap is within 0.004, with no trend in lr. By the pre-stated rules, there are no new guesses: keep A2.
+- **T2 holds** (mass above).
+- **T3 fails.** Half steps are used heavily without help from the floor; A1, with the smallest floor, uses them most.
+- EM and format equal rlcr11's everywhere. Step time is +13-15%, above the +6% guessed from node counts.
+
+A2 full run, 1000 steps (one seed): dev Brier 0.163 vs 0.153 @1000. The last four checkpoints differ by
++0.007 / +0.009 / -0.009 / +0.009. Dev AUROC is 0.837 vs 0.852 (late checkpoints -0.005 to -0.020). The
+progressive numbers are level: argmax Brier over steps 800-1000 is 0.190 vs 0.188, AUROC 0.801 vs 0.798. Both runs
+spike at step 900 (0.191 / 0.200): a shared data-order transient, which shows the pairing works.
+- The half-step share swings between checkpoints (0.09 @500, 0.99 @600, 0.29 @800), and ECE swings with it (0.03-0.16).
+  Greedy sits near ties between adjacent levels, so a small shift moves many rows at once. rlcr11 swings too.
+- So far rlcr21 is not better, and possibly worse by ~0.01 dev Brier at the end. That is inside the A2 seed spread
+  (0.153-0.172). The hoped-for AUROC gain is not seen. Next: the A2r1 / A2r2 replicates (queued 2026-11-25, 80b1a0c088 /
+  3da62f73c4) for a 3-seed paired gap.
+
 ## Run ladder (exact only; dev only; one RTX 4090 via gpuq)
 
 | # | run | pair (rlcr11, existing) | GPU-h | decision |
