@@ -1,5 +1,38 @@
 # rlcr21: exact confidence on a 0.05 grid
 
+## Conclusion (2026-11-26)
+
+**No gain; closed.** A 0.05 grid does not improve exact confidence training over rlcr11, and the reason is structural.
+- **Offline (Stage A, A2, 3 seeds paired with rlcr11):** rlcr21 is worse in every seed, +0.009 / +0.003 / +0.005 dev
+  Brier at step 1000 (progressive +0.002 to +0.003), with no AUROC gain. rlcr11's hyperparameters transfer (200-step
+  paired gaps ≤ 0.004 at lr 1e-4 to 3.7e-4), so this is not mistuning. Step time is +13-15%.
+- **Online (Stage B, B2, seed 202):** equal to rlcr11 (0.160 vs 0.158 @600) only because training drops the half
+  steps. Their share of q goes from 0.56 to 0 between steps 6 and 11, in the overconfident start, and there is no
+  support floor to bring them back. B2r1 / B2r2 were cancelled: they would only re-confirm the collapse.
+- **Why the grid cannot matter much:** the Brier decomposition below. Dev Brier ≈ 0.16 is UNC 0.249 minus
+  discrimination (RES 0.08-0.10) plus a miscalibration term only 0.001-0.006 above its 500-row noise floor.
+  Cross-validated isotonic recalibration, the best any reshaping of the stated confidences can do without changing
+  their ranking, moves Brier by -0.006 to +0.003. The seed-to-seed spread (~0.015) is discrimination, not calibration.
+  A finer grid, smoother or regression-like gradients for q (a log-concavity penalty was considered), or an ordinal
+  loss (RPS, which tied exact earlier) all compete for at most ~0.005 Brier.
+- **Where the headroom is:** discrimination, meaning what the confidence knows about correctness, not the shape of
+  q. Examples: answer agreement across rollouts (loo-agreement worktree, offline AUROC 0.83), or more data per step.
+  Smoothing q would still be worth trying for checkpoint stability (greedy flips between adjacent levels, ECE
+  0.03-0.16 across checkpoints), but not for Brier.
+
+| run (dev, 500 q) | Brier | REL (noise floor) | RES | isotonic CV |
+|---|---|---|---|---|
+| released RLCR, regen 0 / 1 | 0.185 / 0.182 | 0.006 / 0.007 (0.004) | 0.071 / 0.075 | 0.184 / 0.182 |
+| A2 rlcr11 @1000, s102 / 1102 / 2102 | 0.153 / 0.168 / 0.172 | 0.004 / 0.009 / 0.008 (0.003) | 0.100 / 0.091 / 0.085 | 0.153 / 0.163 / 0.167 |
+| A2 rlcr21 @1000, same seeds | 0.163 / 0.171 / 0.177 | 0.008 / 0.014 / 0.008 (0.007) | 0.094 / 0.092 / 0.081 | 0.164 / 0.165 / 0.174 |
+| B2 rlcr11 @600, s202 / 1202 / 2202 | 0.158 / 0.172 / 0.156 | 0.004 / 0.008 / 0.002 (0.003) | 0.095 / 0.086 / 0.093 | 0.161 / 0.167 / 0.159 |
+| B2 rlcr21 @600, s202 | 0.160 | 0.011 (0.003) | 0.101 | 0.154 |
+
+`scripts/brier_decomp.py` (REL noise floor = Σ v(1-v)/N, larger for rlcr21 because it fills more levels). The B2
+rlcr21 run's high RES and recalibrated 0.154 come from one seed at one checkpoint and are treated as noise.
+
+---
+
 `--scorer rlcr21` (`TASK=hotpot-rlvr-21` / `hotpot-rlcr-21`, `LEVELS=21 scripts/prereg_run.sh CID exact`): the rlcr11
 format at 0.05 steps, 0.0, 0.05, 0.1, ..., 0.95, 1.0, spelled as released RLCR writes them (`Ġ0.75Ġ</confidence><|endoftext|>`,
 one decimal unless the second is 5). After `Ġ0.d` one softmax picks the close (0.d) or `5` (0.d5); each value's stop
@@ -100,7 +133,7 @@ spike at step 900 (0.191 / 0.200): a shared data-order transient, which shows th
   Greedy sits near ties between adjacent levels, so a small shift moves many rows at once. rlcr11 swings too.
 - So far rlcr21 is not better, and possibly worse by ~0.01 dev Brier at the end. That is inside the A2 seed spread
   (0.153-0.172). The hoped-for AUROC gain is not seen. Next: the A2r1 / A2r2 replicates (queued 2026-11-25, 80b1a0c088 /
-  3da62f73c4) for a 3-seed paired gap.
+  3da62f73c4) for a 3-seed paired gap (done, below).
 
 ### Results, 2026-11-26: A2 three seeds, B2 seed 202
 
