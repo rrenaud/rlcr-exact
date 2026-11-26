@@ -102,6 +102,29 @@ spike at step 900 (0.191 / 0.200): a shared data-order transient, which shows th
   (0.153-0.172). The hoped-for AUROC gain is not seen. Next: the A2r1 / A2r2 replicates (queued 2026-11-25, 80b1a0c088 /
   3da62f73c4) for a 3-seed paired gap.
 
+### Results, 2026-11-26: A2 three seeds, B2 seed 202
+
+**Stage A, A2, three seeds** (rlcr21 minus rlcr11, paired by seed):
+
+| seed | dev Brier @1000 | best dev, 21 / 11 | dev AUROC @1000 | prog argmax Brier 800-1000 |
+|---|---|---|---|---|
+| 102 | +0.009 | 0.163 / 0.153 | -0.015 | +0.002 |
+| 1102 | +0.003 | 0.166 / 0.163 | -0.000 | +0.003 |
+| 2102 | +0.005 | 0.171 / 0.170 | -0.009 | +0.002 |
+
+rlcr21 is slightly worse in 3 of 3 seeds: about +0.006 dev Brier at the end, +0.002 progressive. That is small, but
+it is consistent and in the wrong direction for the hoped-for gain (≤0.001). No AUROC gain.
+
+**Stage B, B2 seed 202** (online from RLVR, no support floor): dev Brier 0.160 vs 0.158 @600, progressive 400-600
+0.163 vs 0.165, best dev 0.159 vs 0.158. Equal, **because online training abandons the half steps.** The share of
+half-step mass in the training rows' q is 0.45 at step 1, 0.56 at step 6, 0.02 at step 11 and 0.00 from step 16 on
+(0.07 by step 600). Greedy dev text has 0-3% half steps at every checkpoint. The collapse coincides with the
+overconfident start (E_q[c] 0.94 → 0.79 over steps 1-11, accuracy ~0.5). Hypothesis: while the model is
+overconfident, the `5` after `0.d` (worth +0.05) is the worse choice on nearly every row. So one shared token decision
+is pushed down hard (lr 2.4e-4, 128 rows per step), and the exact gradient is proportional to q, so once q is ~0 it
+never comes back. Stage A keeps the half steps because of the support floor (even F 0.019 suffices) and its smaller
+steps (32 rows). In effect, online rlcr21 without a floor is rlcr11 at +5% step time.
+
 ## Run ladder (exact only; dev only; one RTX 4090 via gpuq)
 
 | # | run | pair (rlcr11, existing) | GPU-h | decision |
