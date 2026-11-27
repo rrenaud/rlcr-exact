@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Brier Score, Decomposed</title>
+<meta name="description" content="Splitting Brier score into uncertainty, discrimination and miscalibration, on NBA free throws and on our HotpotQA confidence runs.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,500;6..72,600&family=Public+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg: #f7f8f9; --surface: #fdfdfc; --fg: #15191d; --fg2: #4c545c; --muted: #7a838c;
+  --rule: #dde1e5; --grid: #e8ebee; --chip: #e9eef4;
+  --res: #2a78d6; --rel: #eb6834; --rel-noise: #f5b394; --left: #a3a9ae; --diag: #7a838c;
+  --display: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --body: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121417; --surface: #1a1d21; --fg: #eceef0; --fg2: #b7bec5; --muted: #8a939c;
+  --rule: #2c3137; --grid: #262a30; --chip: #232a33;
+  --res: #3987e5; --rel: #d95926; --rel-noise: #7a3c22; --left: #5d646a; --diag: #8a939c; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121417; --surface: #1a1d21; --fg: #eceef0; --fg2: #b7bec5; --muted: #8a939c;
+  --rule: #2c3137; --grid: #262a30; --chip: #232a33;
+  --res: #3987e5; --rel: #d95926; --rel-noise: #7a3c22; --left: #5d646a; --diag: #8a939c; color-scheme: dark }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.65 var(--body); }
+main { max-width: 780px; margin: 0 auto; padding: 48px 16px 80px; }
+h1, h2 { font-family: var(--display); font-weight: 600; letter-spacing: -0.01em; text-wrap: balance; }
+h1 { font-size: clamp(30px, 5vw, 42px); line-height: 1.12; margin: 0 0 10px; }
+h2 { font-size: 25px; line-height: 1.2; margin: 48px 0 12px; }
+p, ul, ol { margin: 0 0 14px; }
+li { margin-bottom: 8px; }
+a { color: var(--res); }
+code { font: 0.86em var(--mono); background: var(--chip); padding: 1px 5px; border-radius: 3px; }
+.byline { font: 500 13px var(--mono); color: var(--muted); margin-bottom: 28px; }
+.formula { font: 15px var(--mono); padding: 10px 14px; background: var(--surface); border: 1px solid var(--rule); border-radius: 5px; overflow-x: auto; white-space: pre; }
+figure { margin: 24px 0 28px; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px; }
+figcaption { font-size: 13px; color: var(--muted); margin-top: 8px; }
+.ftitle { font-weight: 600; font-size: 15px; margin-bottom: 2px; }
+.fsub { font-size: 13.5px; color: var(--fg2); margin-bottom: 10px; }
+svg { display: block; width: 100%; height: auto; overflow: visible; }
+svg text { fill: var(--fg2); font: 11.5px var(--mono); }
+svg text.grp { fill: var(--fg); font: 600 12px var(--body); }
+.gridl { stroke: var(--grid); } .axis { stroke: var(--rule); }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 13px; color: var(--fg2); margin-bottom: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
+.ln { width: 18px; height: 0; border-top: 3px solid var(--res); display: inline-block; }
+.picker { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.picker button { font: 500 12.5px var(--mono); border: 1px solid var(--rule); background: var(--bg); color: var(--fg2); border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+.picker button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.picker button:focus-visible { outline: 2px solid var(--res); outline-offset: 2px; }
+.stats { font: 12.5px var(--mono); color: var(--fg2); margin-top: 6px; }
+#tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--fg); border: 1px solid var(--rule); border-radius: 5px; padding: 7px 10px; font: 12px/1.45 var(--mono); box-shadow: 0 4px 14px rgb(0 0 0 / .12); z-index: 20; max-width: 300px; display: none; }
+.tablewrap, .scrollx { overflow-x: auto; }
+.scrollx svg { min-width: 620px; }
+table.data { border-collapse: collapse; width: 100%; font: 12.5px var(--mono); }
+table.data th, table.data td { padding: 5px 8px; border-bottom: 1px solid var(--rule); text-align: right; white-space: nowrap; }
+table.data th:first-child, table.data td:first-child { text-align: left; }
+table.data th { color: var(--fg2); font-weight: 500; }
+table.data tr.g td { font: 600 12.5px var(--body); color: var(--fg); padding-top: 12px; }
+.note { font-size: 14px; color: var(--fg2); border-left: 3px solid var(--rule); padding-left: 12px; }
+footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--rule); font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+<h1>Brier score, decomposed</h1>
+<div class="byline">rlcr-exact · rlcr21 notes · 2026-11-26</div>
+
+<p>Brier score is the mean squared error of a probability forecast: state a confidence <i>c</i>, observe <i>y</i> ∈ {0, 1}, pay (<i>c</i> − <i>y</i>)². A low score can come from two very different places. The forecaster can <b>know more</b>, telling likely successes from likely failures. Or it can be <b>better calibrated</b>, meaning its stated numbers match how often it is right. The Murphy decomposition separates the two exactly. That matters for deciding what to work on: changing how a model states its confidence can only fix the second.</p>
+
+<h2>The three terms</h2>
+<p>Group the rows by stated value <i>v</i>. Let <i>n<sub>v</sub></i> be the number of rows that said <i>v</i>, <i>ȳ<sub>v</sub></i> their hit rate, and <i>ȳ</i> the overall hit rate. With bins equal to the stated values (our confidences come from a fixed list, so this is exact):</p>
+<div class="formula">Brier = UNC − RES + REL
+
+UNC = ȳ (1 − ȳ)                     uncertainty: the score of always saying ȳ
+RES = Σ (n_v / N) (ȳ_v − ȳ)²        resolution: how far the groups' hit rates spread from ȳ
+REL = Σ (n_v / N) (v − ȳ_v)²        reliability: how far each stated value is from its group's hit rate</div>
+<ul>
+<li><b>UNC is fixed by the task.</b> No forecaster changes it. On HotpotQA dev the trained models are right about half the time, so UNC ≈ 0.249. NBA free throws go in 78% of the time, so UNC = 0.169.</li>
+<li><b>RES is discrimination.</b> It is the part of the variance of <i>y</i> that the forecast explains, the between-group variance in an analysis of variance. It goes up only when the forecast separates rows that differ in outcome. Relabelling the stated values leaves it unchanged, as long as rows that were grouped together stay together.</li>
+<li><b>REL is miscalibration.</b> It is zero when every stated value equals its group's hit rate. A monotone recalibration, a learned map from stated value to hit rate, can remove it without touching RES.</li>
+</ul>
+<p>Two corrections make the terms usable on a 500-question dev set:</p>
+<ul>
+<li><b>REL has a noise floor.</b> Even a perfectly calibrated forecaster shows REL &gt; 0 on finite data, because each group's hit rate is a sample. Its expected value is about Σ<sub>v</sub> <i>v</i>(1 − <i>v</i>) / <i>N</i>. That is about 0.003 for 11 levels on 500 rows, and it doubles when the forecaster uses 21 levels. Only REL above that floor is evidence of miscalibration.</li>
+<li><b>Cross-validated isotonic recalibration</b> measures what fixing calibration is actually worth. Fit a monotone map from stated value to hit rate on 4/5 of the rows, apply it to the held-out fifth, and repeat over five folds. Its Brier is about the best any reshaping of the stated confidences can reach without new information.</li>
+</ul>
+
+<h2>A clean analogy: free throws</h2>
+<p>Forecast every free throw of the 2023–24 NBA regular season (<span id="nbaN"></span>) using only the 2022–23 season. A free throw is a near-ideal test case. Its outcome is binary, the shooter is the only obvious predictor, and every attempt is equivalent: no defender, same distance.</p>
+<ul>
+<li><b>League rate for everyone:</b> say 0.78 on every shot. This is perfectly calibrated and has zero resolution, so Brier = UNC.</li>
+<li><b>Each shooter's own rate last season</b>, raw. A player who went 3 for 3 is forecast at 1.00. That costs calibration (REL 0.0015, about 8× its noise floor) for a little resolution.</li>
+<li><b>Shrunk toward the league rate</b>, using a beta prior fitted on 2022–23 alone (<span id="kappa"></span> pseudo-attempts). This keeps the same ranking as the raw rate, so RES is unchanged, and REL drops by 70%. Isotonic recalibration of the raw forecast lands in the same place. This is the lever "fix the calibration": it is real, and it is small.</li>
+<li><b>Oracle, in-sample:</b> each shooter's actual 2023–24 rate. This is not a forecast. It is the most that knowing the shooter can ever say, and Brier still only falls from 0.169 to 0.161. Everything else is shot-to-shot luck, and lowering it would take information about the individual shot.</li>
+</ul>
+<p>Read the top block of the figure below that way. Free throws are a task where calibration is easy and discrimination is nearly impossible: RES is under 5% of UNC even for the oracle.</p>
+
+<figure>
+<div class="ftitle">Where each forecaster's Brier comes from</div>
+<div class="fsub">Bar length is Brier score (lower is better). The blue line beneath each bar spans RES, the part of UNC the forecaster's discrimination removed, ending at UNC.</div>
+<div class="legend">
+<span><i class="sw" style="background:var(--left)"></i>UNC − RES: left after discrimination</span>
+<span><i class="sw" style="background:var(--rel-noise)"></i>REL within the noise floor</span>
+<span><i class="sw" style="background:var(--rel)"></i>REL above the noise floor</span>
+<span><i class="ln"></i>RES</span>
+</div>
+<div class="scrollx"><svg id="ledger" role="img" aria-label="Brier decomposition per forecaster; the same numbers are in the table at the end"></svg></div>
+<figcaption>HotpotQA rows: greedy answers on the same 500 dev questions, with the last stated confidence parsed (missing = 0). A runs are offline training on cached RLVR rollouts, 1000 steps; B and C are online, 600 steps, from RLVR and from released RLCR respectively. Each arm uses its own pre-registered hyperparameter pick (exact A2 / B2 / C0, sampled A3 / B0 / C0). Hover for numbers.</figcaption>
+</figure>
+
+<h2>What our runs show</h2>
+<ul>
+<li><b>Before confidence training, Brier is all calibration.</b> The Qwen base model and RLVR state confidences that are nearly unrelated to their hit rates: REL 0.27–0.32, more than the whole task's UNC. RL on the Brier reward fixes that almost completely. Released RLCR and all but two of the runs trained here sit within 0.008 of their REL noise floor. The two exceptions are sampled-arm runs (B0 seed 200, C0) at +0.015.</li>
+<li><b>After confidence training, Brier is all discrimination.</b> Trained runs differ from one another mainly in RES: 0.07 for released RLCR, 0.08–0.10 for ours. The seed-to-seed spread inside one config (about 0.015 Brier for A2 exact) is a RES spread. Cross-validated isotonic recalibration improves no exact-arm run by more than 0.006, and the two sampled exceptions by 0.015.</li>
+<li><b>So a finer confidence grid cannot buy much.</b> rlcr21 states confidences at 0.05 instead of 0.1. That only changes how calibration can be expressed, and calibration is already at its noise floor. It came out slightly worse in all three paired seeds, and the decomposition says why that was the likely outcome before the runs. Free throws show the opposite case. There, forecasts crowd into 0.6–0.9 and a 0.1 grid lumps together shooters who really differ, so the 11-level grid costs about 0.001 against 0.0004 for 21 levels. HotpotQA confidences span the whole range, so lumping costs much less.</li>
+<li><b>Exact vs sampled is mostly a discrimination difference too</b>, in the online stages. B2 exact reaches RES 0.086–0.095 against 0.069–0.076 for B0 sampled. C0 sampled also carries more REL (0.020 vs 0.007). These are single dev checkpoints, each arm at its own pick, so they illustrate the decomposition rather than replace the registered test comparison.</li>
+<li><b>Questions are far more forecastable than free throws.</b> Our trained runs remove 30–40% of UNC; the free-throw oracle removes 5%. The headroom is still in RES: information about whether this particular answer is right, such as agreement between sampled answers.</li>
+</ul>
+
+<figure>
+<div class="ftitle">Reliability: stated value against hit rate</div>
+<div class="fsub">One dot per stated value; area ∝ rows that said it, line = 95% interval of its hit rate. On the diagonal = calibrated. Dots spread far from the overall hit rate (dashed) = resolution.</div>
+<div class="picker" id="relpick" role="group" aria-label="Choose forecaster"></div>
+<svg id="rel" role="img" aria-label="Reliability diagram for the chosen forecaster"></svg>
+<div class="stats" id="relstats"></div>
+<figcaption>For a calibrated forecaster on finite data, about 1 in 20 intervals misses the diagonal. That is the noise floor seen per dot.</figcaption>
+</figure>
+
+<h2>All numbers</h2>
+<div class="tablewrap"><table class="data" id="tbl"></table></div>
+<p class="note">iso-CV is the 5-fold cross-validated isotonic recalibration Brier. For free throws, folds are split by player, and the oracle row is in-sample by construction. AUROC counts ties as half.</p>
+
+<footer>
+Sources: HotpotQA dev rows from the <a href="https://github.com/rrenaud/rlcr-exact">rlcr-exact</a> pre-registered runs (<code>scripts/brier_site_data.py</code>, branch <code>rlcr21</code>); NBA season totals from <a href="https://www.basketball-reference.com/leagues/NBA_2024_totals.html">Basketball-Reference</a> (2022–23, 2023–24 regular seasons, <code>scripts/nba_ft_extract.py</code>). Decomposition: A. H. Murphy, “A new vector partition of the probability score,” <i>J. Appl. Meteor.</i> 1973. Back to the <a href="../">main report</a>.
+</footer>
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+const NS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+const f3 = x => x.toFixed(3), f4 = x => x.toFixed(4);
+const tip = document.getElementById("tip");
+const showTip = (ev, html) => { tip.innerHTML = html; tip.style.display = "block";
+  const r = tip.getBoundingClientRect(); let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14; if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - 14;
+  tip.style.left = x + "px"; tip.style.top = y + "px"; };
+const hideTip = () => tip.style.display = "none";
+const tipOf = d => `<b>${d.label}</b><br>Brier ${f4(d.brier)}<br>UNC ${f4(d.UNC)} − RES ${f4(d.RES)} + REL ${f4(d.REL)}<br>REL noise floor ${f4(d.REL_noise)}<br>iso-CV ${f4(d.iso_cv)} · AUROC ${f3(d.auroc)}<br>${d.levels} stated values · N ${Math.round(d.N).toLocaleString()}`;
+
+fetch("data.json").then(r => r.json()).then(D => {
+  const m = D.nba_meta;
+  document.getElementById("nbaN").textContent = `${m.attempts.toLocaleString()} attempts by ${m.players} players, ${(m.makes / m.attempts * 100).toFixed(1)}% made`;
+  document.getElementById("kappa").textContent = Math.round(m.kappa);
+  const groups = [
+    ["Free throws, NBA 2023–24", D.nba],
+    ["HotpotQA dev: starting points", D.hotpot.filter(d => d.group === "start")],
+    ["Stage A: offline, from RLVR", D.hotpot.filter(d => d.group === "A")],
+    ["Stage B: online, from RLVR", D.hotpot.filter(d => d.group === "B")],
+    ["Stage C: online, from released RLCR", D.hotpot.filter(d => d.group === "C")],
+  ];
+  ledger(groups); reliability(D); table(groups);
+});
+
+function ledger(groups) {
+  const svg = document.getElementById("ledger");
+  const W = 748, L = 236, R = 20, rowH = 24, gH = 26, xmax = 0.55;
+  const x = v => L + (W - L - R) * v / xmax;
+  const n = groups.reduce((a, g) => a + g[1].length, 0), H = 26 + groups.length * gH + n * rowH;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  for (let t = 0; t <= xmax + 1e-9; t += 0.05) {
+    el("line", { x1: x(t), x2: x(t), y1: 18, y2: H, class: "gridl" }, svg);
+    el("text", { x: x(t), y: 11, "text-anchor": "middle" }, svg).textContent = t.toFixed(2);
+  }
+  let y = 26;
+  for (const [name, rows] of groups) {
+    el("text", { x: 0, y: y + 17, class: "grp" }, svg).textContent = name; y += gH;
+    for (const d of rows) {
+      const g = el("g", {}, svg), a = d.UNC - d.RES, cy = y + 8;
+      el("rect", { x: 0, y, width: W, height: rowH, fill: "transparent" }, g);
+      el("text", { x: 8, y: cy + 4 }, g).textContent = d.short || d.label;
+      el("rect", { x: x(0), y: cy - 6, width: x(a) - x(0), height: 12, fill: "var(--left)", rx: 2 }, g);
+      const rn = Math.min(d.REL, d.REL_noise), ra = d.REL - rn;
+      if (rn > 0) el("rect", { x: x(a), y: cy - 6, width: Math.max(x(a + rn) - x(a), 0.8), height: 12, fill: "var(--rel-noise)" }, g);
+      if (ra > 0) el("rect", { x: x(a + rn), y: cy - 6, width: Math.max(x(a + rn + ra) - x(a + rn), 0.8), height: 12, fill: "var(--rel)" }, g);
+      el("line", { x1: x(a), x2: x(d.UNC), y1: cy + 10, y2: cy + 10, stroke: "var(--res)", "stroke-width": 3, "stroke-linecap": "round" }, g);
+      el("text", { x: x(Math.max(d.brier, d.UNC)) + 6, y: cy + 4, style: "fill:var(--fg)" }, g).textContent = f3(d.brier);
+      g.addEventListener("mousemove", ev => showTip(ev, tipOf(d))); g.addEventListener("mouseleave", hideTip);
+      y += rowH;
+    }
+  }
+}
+
+function reliability(D) {
+  const picks = [
+    ["FT raw", D.nba.find(d => d.key === "raw")], ["FT shrunk", D.nba.find(d => d.key === "shrunk")],
+    ["FT shrunk, 0.1 grid", D.nba.find(d => d.key === "shrunk10")],
+    ...D.hotpot.filter(d => /^(Qwen|RLVR|released|A2 exact rlcr11 s102|A2 exact rlcr21 s102|A3 sampled s103|B2 exact rlcr11 s202|B0 sampled s200|C0)/.test(d.label))
+      .map(d => [d.label.replace(" (prompted)", "").replace(" (correctness-only RL)", "").replace(" (Brier RL)", ""), d])];
+  const pick = document.getElementById("relpick");
+  picks.forEach(([name, d], i) => { const b = document.createElement("button"); b.textContent = name;
+    b.setAttribute("aria-pressed", i === 5 ? "true" : "false");
+    b.onclick = () => { pick.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", "false")); b.setAttribute("aria-pressed", "true"); draw(d); };
+    pick.appendChild(b); });
+  const svg = document.getElementById("rel"), S = 420, P = 40, hist = 46, W = S + P + 20, H = S + P + hist + 10;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.style.maxWidth = "520px";
+  const x = v => P + S * v, y = v => 10 + S * (1 - v);
+  function draw(d) {
+    svg.replaceChildren();
+    for (let t = 0; t <= 1.0001; t += 0.1) {
+      el("line", { x1: x(t), x2: x(t), y1: y(0), y2: y(1), class: "gridl" }, svg);
+      el("line", { x1: x(0), x2: x(1), y1: y(t), y2: y(t), class: "gridl" }, svg);
+      if (Math.round(t * 10) % 2 === 0) {
+        el("text", { x: x(t), y: y(0) + 15, "text-anchor": "middle" }, svg).textContent = t.toFixed(1);
+        el("text", { x: P - 6, y: y(t) + 4, "text-anchor": "end" }, svg).textContent = t.toFixed(1);
+      }
+    }
+    el("text", { x: x(0.5), y: y(0) + 30, "text-anchor": "middle" }, svg).textContent = "stated confidence";
+    el("text", { x: 10, y: y(0.5), "text-anchor": "middle", transform: `rotate(-90 10 ${y(0.5)})` }, svg).textContent = "hit rate";
+    el("line", { x1: x(0), y1: y(0), x2: x(1), y2: y(1), stroke: "var(--diag)", "stroke-width": 1.5 }, svg);
+    el("line", { x1: x(0), x2: x(1), y1: y(d.base), y2: y(d.base), stroke: "var(--diag)", "stroke-dasharray": "4 4" }, svg);
+    const N = d.cells.reduce((a, c) => a + c[1], 0), hy = y(0) + 40, maxn = Math.max(...d.cells.map(c => c[1]));
+    const rsc = Math.min(1, 21 / d.cells.length) ** 0.5;
+    for (const [v, n, k] of d.cells) {
+      const p = k / n, z = 1.96, den = 1 + z * z / n, ctr = (p + z * z / (2 * n)) / den, hw = z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den;
+      const g = el("g", {}, svg);
+      el("line", { x1: x(v), x2: x(v), y1: y(Math.min(1, ctr + hw)), y2: y(Math.max(0, ctr - hw)), stroke: "var(--res)", "stroke-width": 1.5, opacity: 0.55 }, g);
+      el("circle", { cx: x(v), cy: y(p), r: Math.max(2.5, 26 * rsc * Math.sqrt(n / N)), fill: "var(--res)", "fill-opacity": 0.75, stroke: "var(--surface)", "stroke-width": 2 }, g);
+      el("rect", { x: x(v) - 3, y: hy + hist - 8 - (hist - 10) * n / maxn, width: 6, height: Math.max(1, (hist - 10) * n / maxn), rx: 1.5, fill: "var(--left)" }, g);
+      el("circle", { cx: x(v), cy: y(p), r: 14, fill: "transparent" }, g);
+      g.addEventListener("mousemove", ev => showTip(ev, `stated ${v}<br>${Math.round(n).toLocaleString()} rows (${(n / N * 100).toFixed(1)}%)<br>hit rate ${f3(p)}<br>95% interval ${f3(Math.max(0, ctr - hw))}–${f3(Math.min(1, ctr + hw))}`));
+      g.addEventListener("mouseleave", hideTip);
+    }
+    el("text", { x: P - 6, y: hy + hist - 10, "text-anchor": "end" }, svg).textContent = "use";
+    document.getElementById("relstats").textContent =
+      `${d.label}: Brier ${f4(d.brier)} = UNC ${f4(d.UNC)} − RES ${f4(d.RES)} + REL ${f4(d.REL)} (noise floor ${f4(d.REL_noise)}); iso-CV ${f4(d.iso_cv)}; AUROC ${f3(d.auroc)}`;
+  }
+  draw(picks[5][1]);
+}
+
+function table(groups) {
+  const t = document.getElementById("tbl");
+  t.innerHTML = "<thead><tr><th>forecaster</th><th>Brier</th><th>UNC</th><th>RES</th><th>REL</th><th>REL noise</th><th>iso-CV</th><th>AUROC</th><th>values</th></tr></thead>";
+  const tb = document.createElement("tbody");
+  for (const [name, rows] of groups) {
+    tb.insertAdjacentHTML("beforeend", `<tr class="g"><td colspan="9">${name}</td></tr>`);
+    for (const d of rows) tb.insertAdjacentHTML("beforeend",
+      `<tr><td>${d.label}</td><td>${f4(d.brier)}</td><td>${f4(d.UNC)}</td><td>${f4(d.RES)}</td><td>${f4(d.REL)}</td><td>${f4(d.REL_noise)}</td><td>${f4(d.iso_cv)}</td><td>${f3(d.auroc)}</td><td>${d.levels}</td></tr>`);
+  }
+  t.appendChild(tb);
+}
+</script>
+</body>
+</html>

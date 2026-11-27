@@ -31,6 +31,45 @@
 `scripts/brier_decomp.py` (REL noise floor = Σ v(1-v)/N, larger for rlcr21 because it fills more levels). The B2
 rlcr21 run's high RES and recalibrated 0.154 come from one seed at one checkpoint and are treated as noise.
 
+### Reading the decomposition
+
+Worked example with charts, free-throw analogy and every Stage A/B/C pick:
+**https://rrenaud.github.io/rlcr-exact/brier/** (source `docs/brier_site/`, data from `scripts/brier_site_data.py`).
+
+Group dev rows by stated confidence v (n_v rows, hit rate ȳ_v; overall hit rate ȳ). Then, exactly:
+
+    Brier = UNC − RES + REL
+    UNC = ȳ(1 − ȳ)                   variance of the outcome; set by the task (≈ 0.249 here: trained models are right ~half the time)
+    RES = Σ n_v/N (ȳ_v − ȳ)²         between-group variance of the outcome = the part of UNC the confidence explains
+    REL = Σ n_v/N (v − ȳ_v)²         squared gap between each stated value and its group's hit rate
+
+It is an analysis of variance of y: UNC is the total, RES is the between-groups share, and UNC − RES is the residual
+that nothing about the stated confidence can remove. REL is separate: the penalty for writing the wrong number on
+a group. Calibration work (a finer grid, smoothing q, an ordinal loss, post-hoc recalibration) can only shrink REL.
+Discrimination work (new information about whether this answer is right) is the only way to grow RES. Two
+corrections make REL readable at N = 500:
+- **Noise floor.** A perfectly calibrated forecaster still shows E[REL] ≈ Σ_v v(1−v)/N, because each ȳ_v is a sample.
+  That is ~0.003 for 10 used levels and ~0.007 for 20. Only REL above the floor is evidence of miscalibration.
+- **Isotonic CV.** A 5-fold cross-validated monotone recalibration is about the best Brier any relabelling of the
+  stated values can reach without new information. It agrees with the floor: it gains ≤ 0.006 on every exact run.
+
+**Analogy: NBA free throws** (2023–24 season, 53,432 attempts, forecast from 2022–23 only; `scripts/nba_ft_extract.py`,
+`docs/brier_site/nba_ft.csv`). Here UNC = 0.169. The league rate for everyone has REL = RES = 0, Brier = UNC. Each shooter's
+raw last-season rate buys RES 0.0047 but pays REL 0.0015 (8× its floor). Shrinking toward the league mean (beta
+prior fitted on 2022–23) keeps that RES and cuts REL to 0.0004. Even the in-sample oracle, each shooter's own
+2023–24 rate, only reaches RES 0.008: 5% of UNC. The rest is shot-to-shot luck that shooter identity cannot see.
+That is the same shape as our problem: calibration is cheap and nearly done, and Brier is bounded by what the
+forecaster knows. The difference is scale. Our trained runs explain 30–40% of UNC.
+
+Across all experiments (the page's table):
+- **Base Qwen and RLVR are REL-dominated** (REL 0.32 / 0.27, larger than UNC). Confidence RL fixes that almost
+  entirely. Every trained run except two sampled-arm checkpoints (B0 s200, C0 sampled, +0.015) is within 0.008
+  of its floor.
+- **Trained runs differ mainly in RES.** Released RLCR has 0.071, ours 0.08–0.10. The online exact picks out-resolve the
+  sampled picks (B2 0.086–0.095 vs B0 0.069–0.076; single dev checkpoints, each arm at its own pick).
+- **The free-throw grid contrast.** There, forecasts crowd into 0.6–0.9, and a 0.1 grid costs ~0.001 Brier vs ~0.0004
+  for 0.05. A grid only matters when the information sits in a narrow range. HotpotQA confidences span 0–1.
+
 ---
 
 `--scorer rlcr21` (`TASK=hotpot-rlvr-21` / `hotpot-rlcr-21`, `LEVELS=21 scripts/prereg_run.sh CID exact`): the rlcr11
