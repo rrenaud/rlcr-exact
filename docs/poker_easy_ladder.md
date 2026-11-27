@@ -46,6 +46,41 @@ exact targets are identical, because the river is deterministic.
 - **Difficulty order for small models:** g1 < g2 ≈ g1b < e2 < g3 < g5 < g4. For the oracle, uncertainty
   makes g5 "harder" than g4. For a learner, g4's combinatorics dominate.
 
+## Capacity on the hard rungs (scripts/easy_capacity.py, CPU 4 threads, half steps: 2-3k steps of batch 512)
+
+Test sets are the same as above (data/easy_big test == data/easy_v1 test). Results are in data/easy_big/capacity.jsonl.
+
+| config | MSE vs exact | corr | accuracy | time |
+|---|---|---|---|---|
+| g4 river, set-TF 64x2, 20k | 0.271 | 0.42 | 0.70 | 3 min |
+| g4 river, set-TF 64x2, 200k | 0.117 | 0.73 | 0.85 | 6 min |
+| g4 river, set-TF 128x4, 200k | 0.063 | 0.87 | 0.92 | 9 min |
+| **g4 river, set-TF 128x4, 200k + aux hand categories** | **0.037** | **0.92** | **0.96** | 6 min |
+| g4 river, looped 128 (1 shared layer), T 1-8, 200k | 0.087 | 0.81 | 0.89 | 5 min |
+| g4 river, MLP 1024, 200k | 0.129 | 0.72 | 0.84 | 0.5 min |
+| g5 turn, set-TF 128x4, 200k, exact | **0.017** | 0.94 | 0.97 | 5 min |
+| g5 turn, set-TF 128x4, 200k, sampled | 0.032 | 0.89 | 0.94 | 5 min |
+| g5 turn, looped 128, T 1-8, 200k, exact | 0.025 | 0.91 | 0.95 | 5 min |
+| g3 three-card, MLP 256, 200k, exact | **0.0006** | 1.00 | 0.98 | 4 s |
+| g3 three-card, MLP 256, 200k, sampled | 0.0052 | 0.97 | 0.95 | 4 s |
+
+The looped model at test loop counts T (accuracy / MSE):
+
+| | T=1 | T=2 | T=4 | T=8 (train max) | T=16 |
+|---|---|---|---|---|---|
+| g4 river | 0.855 / 0.122 | 0.885 / 0.096 | **0.893 / 0.087** | 0.892 / 0.087 | 0.885 / 0.093 |
+| g5 turn | 0.921 / 0.042 | 0.954 / 0.029 | **0.958 / 0.024** | 0.950 / 0.025 | 0.945 / 0.028 |
+
+- **Hand reading is learnable.** The 20k defaults were simply too small. 10x data takes river accuracy from
+  0.70 to 0.85, depth to 0.92, and auxiliary hand-category targets to 0.96. Telling the model what each player
+  holds is the biggest single lever, i.e. a scratchpad-like intermediate label.
+- **Looping helps up to about 4 loops, then plateaus**, and running past the trained range (16) slightly hurts.
+  One shared layer looped 4x approaches the 4-layer model with a quarter of the block parameters, but does not
+  extrapolate to "think longer".
+- **Exact beats sampled at every scale tried.** On the turn: 0.017 vs 0.032 (2x) at 200k. On three-card: the
+  gap shrinks with 10x data (0.001 vs 0.047 at 20k, 0.0006 vs 0.0052 at 200k), but sampled is still ~9x worse
+  with ~9 noisy labels per state.
+
 ## Next
 
 - **7B zero-shot on the ladder** (prompt_ids are already in the data): one gpuq run. Can the 7B at least do
