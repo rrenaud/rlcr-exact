@@ -8,7 +8,8 @@ cd "$(dirname "$0")/.."
 trap '' USR1
 C4=/data/gpuq-runs/rrenaud/rlcr-hotpot-rlvr-cache/run-20261019T233718Z-4511bf5189
 VLLM=/home/rrenaud/envs/vllm/bin/python
-export TASK=hotpot-rlvr-11 NO_TEST=1 GEN_EVAL=0 HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_CACHE=/scratch/hf/hub HF_HUB_OFFLINE=1
+# this clone has no sibling rlcr-reward-conf-weighted-tt-scaling/ (train_frozen.py imports logprob_spans from it)
+export PYTHONPATH=/home/rrenaud/rlcr-exact/rlcr-reward-conf-weighted-tt-scaling TASK=hotpot-rlvr-11 NO_TEST=1 GEN_EVAL=0 HF_HOME=/home/rrenaud/.cache/huggingface HF_HUB_CACHE=/scratch/hf/hub HF_HUB_OFFLINE=1
 run() {  # name arm extra...
   local n=$1 arm=$2; shift 2; mkdir -p $D/$n
   env GPUQ_RUN_DIR=$D/$n GPUQ_PREEMPT_FILE=$D/$n/preempt.json PY=$VLLM timeout 2400 bash scripts/run_frozen.sh $arm 1e-4 200 \
