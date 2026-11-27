@@ -79,7 +79,8 @@ def main():
             ce = float((p1 * values).sum() / max(p1.sum(), 1e-9)) if p1 is not None else None
             # claim: confidence is defined as P(win) whatever the answer; rlcr: P(answer right), so P(win) = c or 1 - c
             eq = lambda c: None if c is None else c if m.get("fmt") == "claim" else None if ans not in ("yes", "no") else (c if ans == "yes" else 1 - c)
-            recs.append(dict(id=q["id"], j=j, street=m["street"], villain_kind=m["villain_kind"], p_win=m["p_win"],
+            recs.append(dict(id=q["id"], j=j, game=m.get("game", "holdem_v1"), street=m.get("street", m.get("game")),
+                             villain_kind=m.get("villain_kind", "known" if m.get("villain") else "random"), p_win=m["p_win"],
                              p_tie=m["p_tie"], outcome=m["outcome"], gold=m["answer"], answer=ans[:40],
                              format_ok=float(q["format_ok"][j]), correct=float(q["correct"][j]), truncated=q["truncated"][j],
                              conf_text=ct, conf_exact=ce, equity_text=eq(ct), equity_exact=eq(ce),
