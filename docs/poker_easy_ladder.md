@@ -81,6 +81,29 @@ The looped model at test loop counts T (accuracy / MSE):
   gap shrinks with 10x data (0.001 vs 0.047 at 20k, 0.0006 vs 0.0052 at 200k), but sampled is still ~9x worse
   with ~9 noisy labels per state.
 
+## 7B zero-shot on the ladder (gpuq run-20261127T111811Z-0b26a0ff91, 300 dev spots per game x k = 4, claim format)
+
+Spearman of stated equity with exact p / Brier vs oracle. The constant guess scores Brier ~0.25 on every game.
+
+| game | Qwen2.5-7B base | RLVR | released RLCR |
+|---|---|---|---|
+| g1 high card | **0.26** / 0.333 | 0.11 / 0.407 | 0.22 / 0.301 |
+| g1b two-card high | 0.07 / 0.347 | 0.09 / 0.355 | 0.09 / 0.288 |
+| g2 Leduc | 0.06 / 0.356 | -0.04 / 0.405 | 0.13 / 0.270 |
+| g3 three-card | 0.00 / 0.379 | -0.01 / 0.352 | 0.06 / 0.320 |
+| g4 river | 0.01 / 0.440 | 0.03 / 0.446 | 0.05 / 0.342 |
+| g5 turn | 0.04 / 0.376 | -0.04 / 0.404 | 0.04 / 0.318 |
+| e2 AK vs 88 | 0.07 / 0.367 | 0.09 / 0.379 | 0.10 / 0.279 |
+
+- **Every model is worse than the constant on every game, even high card**, where the truth is 4r/51 for rank
+  r. The models get the direction: stated equity rises from ~0.57 for a deuce to ~0.8 for an ace. But they
+  compress the whole range into 0.5-0.85 and miscount the deck. One example: "10 cards for each of the 4 lower
+  ranks: 2, 3, 4, 5" for a 9.
+- **Released RLCR is the least overconfident** (lowest Brier everywhere) but no better at discrimination.
+- **So the 7B lacks card arithmetic, not just poker.** A tiny MLP solves g1 exactly from 20k labels in about 2 s.
+  The cheapest real test of exact vs sampled confidence training at 7B scale is g1 / g1b / g2: the targets are
+  learnable, the starting point has weak signal, and there are few states.
+
 ## Next
 
 - **7B zero-shot on the ladder** (prompt_ids are already in the data): one gpuq run. Can the 7B at least do
