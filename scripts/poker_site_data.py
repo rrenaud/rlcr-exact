@@ -26,38 +26,8 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import KFold
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-T = np.linspace(0, 1, 200001)
-
-
-def weight(name):
-    if name == "uniform":
-        w = np.ones_like(T)
-    elif name == "log":
-        w = np.where((T >= 0.001) & (T <= 0.999), 1 / np.clip(T * (1 - T), 1e-12, None), 0)
-    elif name == "caller":
-        w = np.where((T >= 1 / 6) & (T <= 0.4), 1 / np.clip((1 - 2 * T) ** 2, 1e-12, None), 0)
-    w = w / np.trapezoid(w, T)
-    F = np.concatenate([[0], np.cumsum((w[1:] + w[:-1]) / 2 * np.diff(T))])
-    G = np.concatenate([[0], np.cumsum((w[1:] * T[1:] + w[:-1] * T[:-1]) / 2 * np.diff(T))])
-    return w, F, G
-
-
-class Score:
-    def __init__(self, name):
-        self.name = name; self.w, self.F, self.G = weight(name)
-    def F_(self, x): return np.interp(x, T, self.F)
-    def G_(self, x): return np.interp(x, T, self.G)
-    def H(self, p):  # ∫_0^p w t (1-p) + ∫_p^1 w (1-t) p
-        p = np.asarray(p, float)
-        return (1 - p) * self.G_(p) + p * ((self.F_(1) - self.F_(p)) - (self.G_(1) - self.G_(p)))
-    def D(self, p, c):
-        p, c = np.broadcast_arrays(np.asarray(p, float), np.asarray(c, float))
-        a, b = np.minimum(p, c), np.maximum(p, c)
-        return np.abs(p * (self.F_(b) - self.F_(a)) - (self.G_(b) - self.G_(a)))
-    def S(self, c, y):  # loss of stating c when outcome is y
-        return self.H(y) + self.D(y, c)
-
-
+sys.path.insert(0, os.path.join(HERE, "src"))
+from rlcr_exact.betting import T, Score  # noqa: E402
 def decompose(cells, sc, iso=None):
     v = np.array([c[0] for c in cells]); n = np.array([c[1] for c in cells]); k = np.array([c[2] for c in cells])
     N = n.sum(); yb = k.sum() / N; yv = k / n
