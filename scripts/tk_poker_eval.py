@@ -100,7 +100,8 @@ for i, s in enumerate(spots):
         y = float(accuracy_reward("tabc", [[{"role": "assistant", "content": content}]], [s["answer"]], ["hotpot"])[0]) if ok else 0.0
         # claim: confidence is defined as P(win) whatever the answer; rlcr: P(answer right)
         eq = None if conf is None else conf if s.get("fmt") == "claim" else None if ans not in ("yes", "no") else (conf if ans == "yes" else 1 - conf)
-        recs.append(dict(id=s["id"], j=j, street=s["street"], villain_kind=s["villain_kind"], p_win=s["p_win"], p_tie=s["p_tie"],
+        recs.append(dict(id=s["id"], j=j, game=s.get("game", "holdem_v1"), street=s.get("street", s.get("game")),
+                         villain_kind=s.get("villain_kind", "known" if s.get("villain") else "random"), p_win=s["p_win"], p_tie=s["p_tie"],
                          outcome=s["outcome"], gold=s["answer"], answer=ans[:40], format_ok=float(ok), correct=y,
                          truncated=seq.stop_reason != "stop", conf_text=conf, conf_exact=None, equity_text=eq, equity_exact=None,
                          tokens=len(toks), forced=forced, text=content if j == 0 else None))
