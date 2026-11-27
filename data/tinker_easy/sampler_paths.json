@@ -1,0 +1,4 @@
+{"sampled_s150": "tinker://278cf49f-eb0d-52ca-a483-abb1e79a59d9:train:0/sampler_weights/poker_easy_sampled_s150",
+ "sampled_s200": "tinker://6a733209-ea55-505c-b07e-51383e7df1e4:train:0/sampler_weights/poker_easy_sampled_s200",
+ "exact_s150": "tinker://60a540d2-837f-57ed-be37-540edaccd054:train:0/sampler_weights/poker_easy_exact_s150",
+ "exact_s200": "tinker://10c1e860-08a6-532a-80c7-49d00bbfd522:train:0/sampler_weights/poker_easy_exact_s200"}
