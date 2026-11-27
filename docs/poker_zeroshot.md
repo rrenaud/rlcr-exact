@@ -55,6 +55,33 @@ tabc_long prompt; all exit 0.
 - **The forced answer often keeps reasoning** in the text channel and hits the 2,048-token answer cap. That is
   why only 34-72% of forced completions are parsed.
 
+## By difficulty: no easy stratum exists for the 7B models
+
+Answer accuracy (does the stated equity land on the right side of 0.5) by stratum, rlcr format, against the
+majority-answer rate:
+
+| model | river, face up | turn, face up | flop, face up | river, random | turn, random | flop, random |
+|---|---|---|---|---|---|---|
+| base | 0.49 (maj 0.55) | 0.54 (0.53) | 0.52 (0.54) | 0.51 (0.52) | 0.53 (0.54) | 0.53 (0.51) |
+| RLVR | 0.53 | 0.54 | 0.58 | 0.54 | 0.51 | 0.51 |
+| released RLCR | 0.57 | 0.57 | 0.59 | 0.52 | 0.52 | 0.50 |
+| Inkling, 16k | 0.93 | 0.95 | (1 row) | 0.90 | – | (2 rows) |
+
+**Face-up rivers by how far apart the two hands are.** "Who wins" is deterministic there. Even with a gap of 3+
+hand categories (e.g. a flush against a pair), the 7B models are at chance (0.46 / 0.55 / 0.59). Inkling is at
+0.80-0.90. So the 7B starting points cannot read poker hands. Filtering spots by model pass rate is impossible
+(every stratum is at chance), so an easier set has to come from the task's structure:
+
+- **E0** river with the villain face up: who wins, no uncertainty in the cards. Confidence measures the
+  model's own uncertainty, as in HotpotQA.
+- **E1** turn with the villain face up: equity = outs / 44.
+- **E2** (recommended) the fixed matchup A♠K♦ vs 8♥8♣, flop only. A short prompt and a function of three
+  cards with trimodal exact equity, i.e. notebooks/poker_akv88.py at LLM scale. The toy predicts the
+  exact-vs-sampled outcome, which makes it the sharpest short train/test: ~4k train flops, 1k held-out test
+  flops.
+
+Tinker so far: zero-shot only (Inkling-2-Mini free tier). No poker training on Tinker or locally yet.
+
 ## Next
 
 - **Supervised against the exact oracle** on Qwen2.5-7B: SFT to the grid, exact expected Brier vs p, and the
