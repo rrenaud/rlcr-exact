@@ -30,8 +30,14 @@ def _(mo):
 
     The full poker dataset deals random hands to both players. Here both hands are **fixed** and only the flop
     varies. Every one of the 48C3 = 17,296 flops is enumerated with all 990 turn-and-river runouts, so the
-    **exact equity of every state is known**. A model only sees the three flop cards and must output P(hero wins
+    **exact equity of every state is known**. A model only sees the three flop cards and must output P(you win
     outright at showdown).
+
+    *Terms.* **You** hold the first hand and the **opponent** the second. Both are all-in, so all five board
+    cards are dealt and nobody folds. **Equity** here is the probability that you win the pot outright; a split
+    counts as not winning. The **flop** is the first three board cards, and the **runout** is the last two (turn
+    and river). Poker writing calls you the *hero*, the opponent the *villain*, and three of a kind made with a
+    pocket pair a *set*. This notebook avoids those words.
 
     Questions this toy answers in seconds:
 
@@ -49,12 +55,12 @@ def _(mo):
 @app.cell
 def _(mo):
     MATCHUPS = {
-        "A♠K♦ vs 8♥8♣ (AK offsuit vs a middle pair)": ("As Kd", "8h 8c"),
-        "A♥K♥ vs 8♠8♣ (AK suited)": ("Ah Kh", "8s 8c"),
-        "A♠Q♦ vs 9♥9♣": ("As Qd", "9h 9c"),
-        "A♠K♦ vs 7♥7♣": ("As Kd", "7h 7c"),
-        "K♠Q♦ vs 2♥2♣ (two overcards vs a small pair)": ("Ks Qd", "2h 2c"),
-        "J♠T♠ vs A♥A♣ (suited connectors vs aces)": ("Js Ts", "Ah Ac"),
+        "A♠K♦ vs 8♥8♣ (ace-king of two suits vs a pair of eights)": ("As Kd", "8h 8c"),
+        "A♥K♥ vs 8♠8♣ (ace-king of one suit vs a pair of eights)": ("Ah Kh", "8s 8c"),
+        "A♠Q♦ vs 9♥9♣ (ace-queen vs a pair of nines)": ("As Qd", "9h 9c"),
+        "A♠K♦ vs 7♥7♣ (ace-king vs a pair of sevens)": ("As Kd", "7h 7c"),
+        "K♠Q♦ vs 2♥2♣ (king-queen vs a pair of twos)": ("Ks Qd", "2h 2c"),
+        "J♠T♠ vs A♥A♣ (jack-ten of one suit vs a pair of aces)": ("Js Ts", "Ah Ac"),
     }
     matchup = mo.ui.dropdown(options=list(MATCHUPS), value=list(MATCHUPS)[0], label="Matchup")
     matchup
@@ -67,25 +73,26 @@ def _(MATCHUPS, T, matchup, mo, poker):
     HERO, VIL = poker.cards(_h), poker.cards(_v)
     D = T.enumerate_flops(HERO, VIL)
     CAT = T.categories(D["flops"], HERO, VIL)
+    LABELS = T.category_labels(HERO, VIL)
     _pre = D["eq"].mean()
     mo.md(f"""
-    **{poker.names(HERO, True)}** (hero) vs **{poker.names(VIL, True)}**: preflop hero wins **{_pre:.1%}**
+    You hold **{poker.names(HERO, True)}** and the opponent holds **{poker.names(VIL, True)}**. Before the flop you win **{_pre:.1%}**
     outright, ties {D['ties'].mean() / T.N_RUNOUTS:.1%}. {len(D['flops']):,} flops, exact equity of each from 990
     runouts ({'cached' if D['cached'] else f"enumerated in {D['seconds']:.1f} s"}). Only
     **{len(set(D['wins'].tolist()))}** distinct equity values occur.
     """)
-    return CAT, D, HERO, VIL
+    return CAT, D, HERO, LABELS, VIL
 
 
 @app.cell
-def _(CAT, COLORS, D, T, np, plt):
+def _(CAT, COLORS, D, LABELS, T, np, plt):
     _fig, _ax = plt.subplots(figsize=(7.5, 2.8))
     _bins = np.linspace(0, 1, 51)
     _ax.hist([D["eq"][CAT == c] for c in T.CATEGORY_ORDER], bins=_bins, stacked=True,
-             color=[COLORS[c] for c in T.CATEGORY_ORDER], label=[f"{c} ({(CAT == c).sum():,})" for c in T.CATEGORY_ORDER])
+             color=[COLORS[c] for c in T.CATEGORY_ORDER], label=[f"{LABELS[c]} ({(CAT == c).sum():,})" for c in T.CATEGORY_ORDER])
     _ax.axvspan(1 / 6, 0.4, color="#eb6834", alpha=0.08, lw=0)
     _ax.text(0.283, _ax.get_ylim()[1] * 0.92, "calling band", ha="center", color="#b0502a", fontsize=8)
-    _ax.set_xlabel("exact flop equity (P hero wins outright)"); _ax.set_ylabel("flops")
+    _ax.set_xlabel("exact flop equity (P you win outright)"); _ax.set_ylabel("flops")
     _ax.legend(frameon=False, fontsize=8); _ax.set_title("Every flop's exact equity", loc="left", fontsize=10)
     _fig.tight_layout()
     _fig
@@ -100,7 +107,7 @@ def _(mo):
 
 
 @app.cell
-def _(CAT, D, HERO, T, VIL, mo, np, poker, sample_seed):
+def _(CAT, D, HERO, LABELS, T, VIL, mo, np, poker, sample_seed):
     _rng = np.random.default_rng(sample_seed.value)
     _rows = []
     for _i in _rng.choice(len(D["flops"]), 8, replace=False):
@@ -112,10 +119,10 @@ def _(CAT, D, HERO, T, VIL, mo, np, poker, sample_seed):
             _ro = list(_rng.choice(_deck, 2, replace=False))
             _a = poker.eval7(np.array([HERO + _f + _ro]))[0]; _b = poker.eval7(np.array([VIL + _f + _ro]))[0]
             _res.append("W" if _a > _b else "T" if _a == _b else "·")
-        _rows.append({"flop": poker.names(_f, True), "category": CAT[_i], "exact equity": f"{D['eq'][_i]:.3f}",
+        _rows.append({"flop": poker.names(_f, True), "what happened": LABELS[CAT[_i]], "exact equity": f"{D['eq'][_i]:.3f}",
                       "12 sampled showdowns": "".join(_res), "sampled mean": f"{_res.count('W') / 12:.2f}"})
     mo.vstack([mo.md("**Random flops.** One sampled showdown is the 0/1 label RLCR's reward sees; the exact "
-                     "equity is what it is noisy about (W = hero wins, T = split, · = loses)."),
+                     "equity is what it is noisy about (W = you win, T = split, · = you lose)."),
                mo.ui.table(_rows, selection=None, pagination=False)])
     return
 
@@ -177,12 +184,12 @@ def _(CALLER, D, T, epochs, feats, fit_seed, hidden, kdial, mo, np, ntrain, time
 
 
 @app.cell
-def _(CAT, COLORS, P, Q, T, TE, np, plt):
+def _(CAT, COLORS, LABELS, P, Q, T, TE, np, plt):
     _fig, (_a, _b) = plt.subplots(1, 2, figsize=(8.5, 3.6))
     _c = CAT[TE]
     for _k in T.CATEGORY_ORDER:
         _m = _c == _k
-        _a.scatter(P[_m], Q[_m], s=4, alpha=0.35, color=COLORS[_k], label=_k, rasterized=True)
+        _a.scatter(P[_m], Q[_m], s=4, alpha=0.35, color=COLORS[_k], label=LABELS[_k], rasterized=True)
     _a.plot([0, 1], [0, 1], color="#7a838c", lw=1)
     _a.set_xlabel("exact equity"); _a.set_ylabel("model"); _a.set_title("Test flops", loc="left", fontsize=10)
     _a.legend(frameon=False, fontsize=7, markerscale=3)
@@ -262,7 +269,7 @@ def _(MATCHUPS, mo):
     ## Did it learn poker, or a lookup table?
 
     Apply the model trained above, unchanged, to every flop of a different matchup. The inputs are only the board
-    cards, so a model that learned "an ace or king pairs the hero" transfers to matchups where that is still true,
+    cards, so a model that learned "an ace or king pairs you" transfers to matchups where that is still true,
     and one that memorized this matchup does not. One-hot weights for the original matchup's four hole cards were
     never trained (those cards cannot appear on its boards), so boards containing them are out of distribution.
     """), transfer])
@@ -276,11 +283,11 @@ def _(MATCHUPS, PREDICT, T, feats, mo, np, plt, poker, transfer):
     _D2 = T.enumerate_flops(_H, _V)
     _Q2 = PREDICT(T.features(_D2["flops"], feats.value))
     _s = T.scores(_Q2, _D2["eq"])
-    _c2 = T.categories(_D2["flops"], _H, _V)
+    _c2 = T.categories(_D2["flops"], _H, _V); _l2 = T.category_labels(_H, _V)
     _fig, _ax = plt.subplots(figsize=(4.6, 3.6))
     for _k, _col in [("villain sets", "#8a5cc2"), ("miss", "#7a838c"), ("miss + flush draw", "#2a78d6"), ("hero pairs", "#eb6834")]:
         _m = _c2 == _k
-        _ax.scatter(_D2["eq"][_m], _Q2[_m], s=3, alpha=0.3, color=_col, label=_k, rasterized=True)
+        _ax.scatter(_D2["eq"][_m], _Q2[_m], s=3, alpha=0.3, color=_col, label=_l2[_k], rasterized=True)
     _ax.plot([0, 1], [0, 1], color="#7a838c", lw=1); _ax.legend(frameon=False, fontsize=7, markerscale=3)
     _ax.set_xlabel("exact equity (new matchup)"); _ax.set_ylabel("model trained on the first matchup")
     _fig.tight_layout()
@@ -311,7 +318,7 @@ def _(mo):
     - **Exact targets are worth a lot of data.** For an MLP 128, exact targets on 500 flops (MSE 0.003) beat one
       showdown per flop on all 14,000 (0.009).
     - **Transfer is partial.** Trained on AK vs 88 and applied to AK vs 77, correlation is ~0.70: it learned
-      "an ace or king helps the hero", and it memorized "eights are bad".
+      "an ace or king helps you", and it memorized "eights are bad".
     - **Discrimination is the ceiling.** Brier against the oracle can never drop below the luck term (~0.15
       here). Everything a model does happens in the MSE above it.
     """)

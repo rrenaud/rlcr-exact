@@ -57,21 +57,34 @@ COMMIT = tok.encode("\n\nI'm out of time, so I'll commit to my best estimate now
 aparams = types.SamplingParams(max_tokens=a.answer_tokens, temperature=a.temperature, stop=ren.get_stop_sequences())
 
 
-def finish(prompt, seq):
-    """(tokens, stop_reason, forced): the sequence, or for a budget-cut thinking trace, trace + commit + answer."""
+def start_forced(prompt, seq):
+    """For a budget-cut thinking trace: (head, future) where head = trace + commit + end-of-thinking and the future
+    samples the answer; None if the sequence finished or already reached the text channel."""
     toks = list(seq.tokens)
-    if not a.think_budget or seq.stop_reason == "stop" or 200004 in toks:  # finished, or already in the text channel
-        return toks, seq.stop_reason, False
+    if not a.think_budget or seq.stop_reason == "stop" or 200004 in toks:
+        return None
     head = toks + COMMIT + END_THINK
-    r = sampler.sample(prompt=types.ModelInput.from_ints(prompt + head), num_samples=1, sampling_params=aparams).result()
-    return head + list(r.sequences[0].tokens), r.sequences[0].stop_reason, True
+    return head, sampler.sample(prompt=types.ModelInput.from_ints(prompt + head), num_samples=1, sampling_params=aparams)
+
+
+# phase 1 results, then every forced continuation submitted at once (Tinker futures run concurrently)
+phase1 = [f.result().sequences for f in futs]
+forced_futs = {(i, j): start_forced(prompts[i], q) for i, seqs in enumerate(phase1) for j, q in enumerate(seqs)}
+print(json.dumps(dict(event="phase1", forced=sum(v is not None for v in forced_futs.values()),
+                      elapsed=round(time.time() - t0))), flush=True)
 
 
 recs = []
-for i, (s, f, prompt) in enumerate(zip(spots, futs, prompts)):  # forced answers run serially per spot (small)
-    for j, seq0 in enumerate(f.result().sequences):
-        toks, stop, forced = finish(prompt, seq0)
-        seq = pytypes.SimpleNamespace(tokens=toks, stop_reason=stop) if forced else seq0
+for i, s in enumerate(spots):
+    for j, seq0 in enumerate(phase1[i]):
+        ff = forced_futs[(i, j)]
+        forced = ff is not None
+        if forced:
+            r = ff[1].result().sequences[0]
+            seq = pytypes.SimpleNamespace(tokens=ff[0] + list(r.tokens), stop_reason=r.stop_reason)
+        else:
+            seq = seq0
+        toks = list(seq.tokens)
         msg, _ = ren.parse_response(toks)
         content = msg["content"] if isinstance(msg["content"], str) else "".join(
             x.get("text", "") for x in msg["content"] if isinstance(x, dict))

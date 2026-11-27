@@ -82,6 +82,25 @@ def categories(flops, hero, villain):
 
 
 CATEGORY_ORDER = ["villain sets", "miss", "miss + flush draw", "hero pairs"]
+_RANK_WORD = dict(zip("23456789TJQKA", ["two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+                                         "jack", "queen", "king", "ace"]))
+_PLURAL = {"six": "sixes"}
+
+
+def category_labels(hero, villain):
+    """Plain-language label per category key, for a reader who knows the rules but not forum jargon
+    ("hero" = you, "villain" = opponent, "set" = three of a kind made with a pocket pair)."""
+    w = lambda c: _RANK_WORD[poker.RANKS[c // 4]]
+    pl = lambda word: _PLURAL.get(word, word + "s")
+    vr = sorted({w(c) for c in villain}); hr = sorted({w(c) for c in hero}, key=lambda x: -list(_RANK_WORD.values()).index(x))
+    opp = (f"opponent makes three {pl(vr[0])}" if len(vr) == 1 else f"a {' or '.join(vr)} flops for your opponent")
+    you = f"you pair your {' or '.join(hr)}" if len(hr) > 1 else f"you make three {pl(hr[0])}"
+    ranks = hr + vr
+    none = ranks[0] if len(ranks) == 1 else ", ".join(ranks[:-1]) + " or " + ranks[-1]
+    suited = len({c % 4 for c in hero}) == 1
+    fd = "two cards of your suit" if suited else "two cards of one of your suits"
+    return {"villain sets": opp, "hero pairs": you, "miss": f"no {none} on the flop",
+            "miss + flush draw": f"no {none}, but {fd} (flush draw)"}
 
 
 def sampled_targets(wins, k, rng):

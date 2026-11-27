@@ -66,10 +66,11 @@ Paste this to the agent, together with the URL.
 The agent should confirm each one. Fit numbers can differ in the third decimal across machines (CPU torch
 threading), and that is fine.
 
-1. **Header:** "preflop hero wins **44.3%** outright, ties 0.3%", "17,296 flops", "Only **188** distinct equity
+1. **Header:** "Before the flop you win **44.3%** outright, ties 0.3%", "17,296 flops", "Only **188** distinct equity
    values occur".
-2. **Histogram:** the legend reads villain sets (2,116), miss (6,940), miss + flush draw (2,940), hero pairs
-   (5,300). There are three modes, near 0.05, 0.25 and 0.9, with no flops between about 0.65 and 0.8.
+2. **Histogram:** the legend reads "opponent makes three eights" (2,116), "no ace, king or eight on the flop"
+   (6,940), "no ace, king or eight, but two cards of one of your suits (flush draw)" (2,940) and "you pair your
+   ace or king" (5,300). There are three modes, near 0.05, 0.25 and 0.9, with no flops between about 0.65 and 0.8.
 3. **Default fit** (MLP 128, onehot+counts, k = 1, 12000 flops, 300 epochs, seed 0): test MSE vs exact ≈
    **0.010**, correlation ≈ 0.953, REL ≈ 0.004. The "oracle" row has Brier vs oracle 0.1497.
 4. **Set k to 990:** MSE ≈ **0.0013**, correlation ≈ 0.993, REL ≈ 0.0002. The scatter collapses onto the
