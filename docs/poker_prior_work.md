@@ -36,3 +36,39 @@ not equity, and none is Qwen2.5-7B. So the contamination risk is low, apart from
 - Evaluators: eval7 (MIT, Cython, exact hand-vs-range), phevaluator (Apache-2.0, fast C), treys (pure Python).
 - We use our own numpy evaluator (src/rlcr_exact/poker.py, tested against a reference). eval7 or phevaluator is
   the upgrade path if speed matters.
+
+# Pro and poker-system evals, human baselines (survey 2, 2026-11-27)
+
+**AI vs pros.** These are scored by win rate, not equity:
+- Claudico (2015): the humans' edge was not significant.
+- DeepStack (Science 2017): about 486 mbb/g scored with AIVAT; histories are in the supplement [S].
+- Libratus (2017): 14.7 bb/100 over 120k hands [S].
+- Pluribus (Science 2019): about 5 bb/100 with AIVAT, p = 0.021; its 10k hands are Data File S1 [V].
+- AIVAT and duplicate deals are the variance-reduction tools.
+
+**Hand histories.** The PHH dataset (github.com/uoftcprg/phh-dataset, MIT; full set on Zenodo) [V] holds:
+- all 10k Pluribus hands, with every hole card visible;
+- 21.6M HandHQ online no-limit hands (2009, 25NL-1000NL), with villain cards mostly shown only at showdown;
+- the ACPC logs (Zenodo only);
+- 83 televised WSOP hands.
+
+PokerKit reads them. These are realistic spot distributions to replace uniform random deals. The IRC poker
+database is play money, with no license stated [S].
+
+**Human equity estimation, the human baseline.** None of these studies uses a proper scoring rule:
+- Liley & Rakow 2010, J. Behav. Decis. Making 23:496, doi:10.1002/bdm.670 [S]. 69 moderately experienced players
+  estimated P(best hand) preflop and on the flop against 1-9 opponents, compared with simulation. They were
+  generally accurate and slightly overconfident when P < 0.7, and paid too little attention to the number of
+  opponents. This is the closest match to our task.
+- Zhu et al. 2022, Cognition 223:105022, PMC8987733 [V]. Experts (186, from twoplustwo) estimated flop-event
+  frequencies much better than novices or amateurs. Scored by summed absolute error. OSF prereg osf.io/8scg4.
+- Linnet et al. 2010, J. Gambling Issues 24 [S]: experienced players showed less estimation bias.
+
+**LLMs against bots.** GTO Wizard Benchmark (arXiv 2603.23660) [V]: every LLM loses (GPT-5.3 xhigh -16 bb/100
+was best). Husky Hold'em Bench and Kaggle Game Arena poker [S]. No study pits LLMs against human pros.
+
+**Equity-trainer apps** publish no accuracy numbers. No benchmark measures equity estimation by solvers or bots.
+
+**Use.** (a) Human baseline: compare MAE and bias with Liley & Rakow on preflop and flop spots. For a Brier
+baseline, ask the authors for item-level data, or run our dev spots on human players. (b) Realistic spots: PHH via
+PokerKit (Pluribus for fully visible hands, HandHQ for realistic boards and action lines).
