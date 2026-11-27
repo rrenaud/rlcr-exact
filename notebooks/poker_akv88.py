@@ -7,6 +7,7 @@ app = marimo.App(width="medium", app_title="AK vs 88: a toy equity task")
 @app.cell
 def _():
     import os, sys, time
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # CPU only: never touch a GPU outside gpuq (shared hosts)
     import marimo as mo
     import numpy as np
     import matplotlib.pyplot as plt
