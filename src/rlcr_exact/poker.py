@@ -215,3 +215,14 @@ def deal_outcome(hero, board, villain, rng):
 def _ncomb(n, k):
     from math import comb
     return comb(n, k)
+
+
+
+def eval7_any(hands):
+    """Strength of 5-7 card hands of mixed length (eval7's logic is column-generic: best 5 of n)."""
+    out = np.zeros(len(hands), np.int64); by_len = {}
+    for i, h in enumerate(hands):
+        by_len.setdefault(len(h), []).append(i)
+    for n, idx in by_len.items():
+        out[idx] = eval7(np.array([hands[i] for i in idx], dtype=np.int64))
+    return out

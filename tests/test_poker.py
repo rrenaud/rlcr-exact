@@ -88,3 +88,12 @@ def test_river_vs_random_counts():
     rest = [c for c in range(52) if c not in hero]
     w = sum(ref7(hero) > ref7(list(v) + hero[2:]) for v in itertools.combinations(rest, 2))
     assert abs(pw - w / 990) < 1e-12
+
+
+def test_eval_5_and_6_cards():
+    rng = np.random.default_rng(3)
+    for n in (5, 6):
+        hands = np.array([rng.choice(52, n, replace=False) for _ in range(2000)])
+        v = eval7(hands); r = [max(ref5(x) for x in itertools.combinations(list(h), 5)) for h in hands]
+        for i in range(len(r) - 1):
+            assert np.sign(v[i] - v[i + 1]) == int(r[i] > r[i + 1]) - int(r[i] < r[i + 1])
