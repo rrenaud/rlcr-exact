@@ -28,6 +28,8 @@ ap.add_argument("--think-budget", type=int, default=0,
                 help="budget forcing (knob, 0 = off): stop native thinking at N tokens, append a commit line, close the "
                      "thinking channel (<|end_message|><|message_model|><|content_text|>) and sample the answer")
 ap.add_argument("--answer-tokens", type=int, default=1024)
+ap.add_argument("--state", default=None, help="a trained checkpoint: tinker://.../sampler_weights/... is sampled directly; "
+                "a save_state path (.../weights/stepNNNN) is first converted, which needs a training client (a free-tier slot)")
 ap.add_argument("--rlcr", default="/home/rrenaud/rlcr_platt/RLCR")
 a = ap.parse_args()
 sys.path.insert(0, a.rlcr)
@@ -41,7 +43,13 @@ base = a.model.split(":")[0]
 tok = get_tokenizer(base); ren = get_renderer("tml_v0", tok, model_name=base)
 sysp = get_sys_prompt("tabc_long")
 spots = [json.loads(l) for l in open(a.eval)][: a.limit]
-sampler = tinker.ServiceClient().create_sampling_client(base_model=a.model)
+sc = tinker.ServiceClient()
+if a.state and "/sampler_weights/" not in a.state:
+    tc = sc.create_training_client_from_state(a.state).result()
+    a.state = tc.save_weights_for_sampler(name=a.state.rstrip("/").split("/")[-1] + "_poker").result().path
+    print(json.dumps(dict(event="sampler_weights", path=a.state)), flush=True)
+    del tc
+sampler = sc.create_sampling_client(model_path=a.state) if a.state else sc.create_sampling_client(base_model=a.model)
 params = types.SamplingParams(max_tokens=a.max_tokens, temperature=a.temperature, stop=ren.get_stop_sequences())
 t0 = time.time()
 futs, prompts = [], []
@@ -111,7 +119,7 @@ with gzip.open(os.path.join(out, f"{a.tag}.jsonl.gz"), "wt") as fo:
     for r in recs:
         fo.write(json.dumps(r) + "\n")
 g = [r for r in recs if r["equity_text"] is not None]
-summ = dict(tag=a.tag, model=a.model, k=a.k, completions=len(recs), format_ok=float(np.mean([r["format_ok"] for r in recs])),
+summ = dict(tag=a.tag, model=a.model, state=a.state, k=a.k, completions=len(recs), format_ok=float(np.mean([r["format_ok"] for r in recs])),
             truncated=float(np.mean([r["truncated"] for r in recs])), tokens=float(np.mean([r["tokens"] for r in recs])),
             mse_equity_text_vs_oracle=float(np.mean([(r["equity_text"] - r["p_win"]) ** 2 for r in g])) if g else None,
             elapsed=round(time.time() - t0))
