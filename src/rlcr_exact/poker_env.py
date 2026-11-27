@@ -28,7 +28,24 @@ STREETS = {"flop": 3, "turn": 4, "river": 5}
 CONF_RE = re.compile(r"<confidence>\s*([0-9]*\.?[0-9]+)\s*</confidence>")
 
 
-def problem_text(spot, fmt="claim", sym=False):
+GUIDES = {
+    None: "",
+    # knob, off by default (RLCR's prompt has no length guidance): reasoning models otherwise try to enumerate every
+    # runout and opponent hand in their head and run past 16k tokens (Inkling-2-Mini, 2026-11-27)
+    "estimate": ("\nDo not enumerate every possible runout or opponent hand. Estimate the way a strong player does at "
+                 "the table: identify the hands you beat and lose to, count outs, and use rules of thumb such as the rule "
+                 "of 2 and 4. Keep your reasoning under 300 words. Inside <answer> write only the single word."),
+    # v1 above hurt Inkling (2026-11-27, 200 spots): the word budget did not shorten native thinking (12.6k vs 13.5k
+    # tokens), river hand reading got sloppier, and half its "no" answers switched to confidence = P(answer right).
+    # v2: no word budget, and the claim semantics restated.
+    "estimate2": ("\nYou do not need to enumerate every possible runout or opponent hand exactly; an estimate the way a "
+                  "strong player makes it at the table (count outs, rules of thumb such as the rule of 2 and 4) is fine. "
+                  "Check the hand rankings carefully. Whatever you think will happen, write yes in <answer>: your "
+                  "confidence is your probability that you win outright, so a likely loss gets a low confidence."),
+}
+
+
+def problem_text(spot, fmt="claim", sym=False, guide=None):
     hero = poker.names(spot["hero"], sym); board = poker.names(spot["board"], sym)
     street = {3: "Flop", 4: "Turn (board so far)", 5: "River (full board)"}[len(spot["board"])]
     if spot["villain_kind"] == "known":
@@ -40,7 +57,7 @@ def problem_text(spot, fmt="claim", sym=False):
          + ('Answer "yes". Your confidence is the probability that you win outright.' if fmt == "claim"
             else 'Answer "yes" or "no".'))
     return (f"Heads-up Texas Hold'em. Both players are all-in.{deal}\n"
-            f"Your hole cards: {hero}.\n{street}: {board}.\n{opp}\n{q}")
+            f"Your hole cards: {hero}.\n{street}: {board}.\n{opp}\n{q}{GUIDES[guide]}")
 
 
 def sample_spot(rng, street=None, villain_kind=None):
@@ -93,15 +110,15 @@ def score(spot, completion, fmt=None):
 
 
 class PokerEquityEnv:
-    def __init__(self, fmt="claim", seed=0, streets=None, villain_kinds=None, sym=False):
-        self.fmt, self.sym, self.rng = fmt, sym, np.random.default_rng(seed)
+    def __init__(self, fmt="claim", seed=0, streets=None, villain_kinds=None, sym=False, guide=None):
+        self.fmt, self.sym, self.guide, self.rng = fmt, sym, guide, np.random.default_rng(seed)
         self.streets, self.kinds = streets, villain_kinds
 
     def reset(self):
         st = self.rng.choice(self.streets) if self.streets else None
         vk = self.rng.choice(self.kinds) if self.kinds else None
         spot = label(solve(sample_spot(self.rng, st, vk)), self.rng)
-        spot["problem"] = problem_text(spot, self.fmt, self.sym)
+        spot["problem"] = problem_text(spot, self.fmt, self.sym, self.guide)
         return spot
 
     def score(self, spot, completion):

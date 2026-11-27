@@ -37,6 +37,7 @@ def main():
     ap.add_argument("--dev", type=int, default=500)
     ap.add_argument("--test", type=int, default=1000)
     ap.add_argument("--fmt", default="claim", choices=["claim", "rlcr"])
+    ap.add_argument("--guide", default=None, choices=["estimate", "estimate2"], help="length/estimation guidance (knob; off = RLCR prompt)")
     ap.add_argument("--sym", action="store_true", help="suit symbols (A♠) instead of letters (As)")
     ap.add_argument("--model", default=None, help="tokenizer for prompt_ids, e.g. mehuldamani/hotpot-v2-correctness-7b")
     ap.add_argument("--rlcr", default="/home/rrenaud/rlcr_platt/RLCR")
@@ -60,7 +61,7 @@ def main():
                     if split != "train" and k in seen:
                         continue
                     seen.add(k)
-                    r["problem"] = poker_env.problem_text(r, a.fmt, a.sym); r["fmt"] = a.fmt; r["source"] = "hotpot"
+                    r["problem"] = poker_env.problem_text(r, a.fmt, a.sym, a.guide); r["fmt"] = a.fmt; r["guide"] = a.guide; r["source"] = "hotpot"
                     if tok is not None:
                         text = tok.apply_chat_template([{"role": "system", "content": sys_prompt},
                                                         {"role": "user", "content": f"\n\nPROBLEM: {r['problem']}\n\n"}],
