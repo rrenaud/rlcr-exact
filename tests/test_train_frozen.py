@@ -219,3 +219,14 @@ def test_token_parts_caps_rows_and_tokens():
     assert token_parts([], 8, 100) == []
     assert token_parts([10] * 5, 2, 100) == [(0, 2), (2, 4), (4, 5)]
     assert token_parts([60, 50, 1536, 10, 10], 8, 100) == [(0, 1), (1, 2), (2, 3), (3, 5)]  # a long row alone
+
+
+def test_mixed_group_is_dapo_filter():
+    q = lambda correct, ok: dict(correct=correct, format_ok=ok)
+    assert not train_frozen.mixed_group(q([1, 1, 1], [1, 1, 1]))  # all right
+    assert not train_frozen.mixed_group(q([0, 0, 0], [1, 1, 1]))  # all wrong
+    assert train_frozen.mixed_group(q([1, 0, 1], [1, 1, 1]))
+    # A correct answer with a broken format counts as wrong, so all-right-but-one-malformed is mixed ...
+    assert train_frozen.mixed_group(q([1, 1, 1], [1, 0, 1]))
+    # ... and correct-but-malformed alone is not a right rollout.
+    assert not train_frozen.mixed_group(q([1, 0, 0], [0, 1, 1]))

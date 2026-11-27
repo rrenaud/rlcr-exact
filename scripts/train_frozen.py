@@ -153,6 +153,17 @@ def warm_weight(args, step):
     return args.warm_ce * max(0.0, 1 - (step - 1) / max(args.warm_steps, 1))
 
 
+def right_rollout(correct, format_ok):
+    """A rollout counts as right for --filter-uniform-groups only if well-formed and correct (their format-gated accuracy)."""
+    return bool(correct) and bool(format_ok)
+
+
+def mixed_group(q):
+    """True if a fresh question's rollouts are neither all right nor all wrong (DAPO's filter keeps only these)."""
+    n_right = sum(map(right_rollout, q["correct"], q["format_ok"]))
+    return 0 < n_right < len(q["correct"])
+
+
 def sample_draws(qs, correct, values, k):
     """k draws per row from its candidate distribution plus "other" (index K, reward 0): [[(j, reward)] * k] per row."""
     out = []
@@ -522,6 +533,14 @@ def main():
                          "sampled: RLCR (k = 1) — r = R(a, c) of the confidence drawn for the sampled objective, one "
                          "advantage per rollout for answer and confidence alike (needs --objective sampled; tail faults "
                          "and malformed rollouts earn 0, and both terms share the group baseline over all rollouts)")
+    ap.add_argument("--filter-uniform-groups", choices=["none", "drop", "refill"], default="none",
+                    help="DAPO's dynamic-sampling filter as the Pitfalls paper's RLCR uses it (arXiv 2609.32470, their "
+                         "replay_buffer.py): train only on questions whose rollouts are neither all right nor all wrong "
+                         "(right = format ok and correct; malformed count as wrong). drop: train on the mixed groups among "
+                         "the step's questions (fewer per step); refill: generate further batches of questions until the "
+                         "step has --problems-per-step mixed groups or --filter-max-gen batches. Needs --refresh-every 1")
+    ap.add_argument("--filter-max-gen", type=int, default=8,
+                    help="with --filter-uniform-groups refill: most generation batches per step (theirs: 20)")
     ap.add_argument("--out", default=os.environ.get("GPUQ_RUN_DIR", "."))
     ap.add_argument("--no-log-q", action="store_true",
                     help="skip q_<run>.jsonl.gz: every training rollout's confidence distribution over the 11 levels at each step (before the update), with its label, expected reward and Var_q[R]")
@@ -566,6 +585,9 @@ def main():
         run_name += f"_C{args.conf_weight:g}"
     if args.answer_pg:
         run_name += f"_pg{args.answer_pg:g}{args.pg_reward[:3]}" + ("_bRLCR" if args.pg_balance == "rlcr" else "")
+    if args.filter_uniform_groups != "none":
+        assert args.refresh_every == 1, "--filter-uniform-groups needs --refresh-every 1 (on-policy groups per step)"
+        run_name += f"_fu{args.filter_uniform_groups}"
     log_path = os.path.join(args.out, f"train_{run_name}.jsonl")
 
     def log(**rec):
@@ -753,6 +775,13 @@ def main():
             lora = publisher.publish(model) if step > 1 or args.init_adapter else None  # a fresh LoRA is the base (B = 0)
             refreshes += 1
             qs = roller([questions[g] for g in order[:need]], lora)
+            consume, gens = need, 1  # questions taken from order this step; generation batches
+            if args.filter_uniform_groups == "refill":
+                while sum(map(mixed_group, qs)) < need and gens < args.filter_max_gen:
+                    while len(order) < consume + need:
+                        order += random.sample(group_ids, len(group_ids))
+                    qs = qs + roller([questions[g] for g in order[consume: consume + need]], lora)
+                    consume += need; gens += 1
             gen_s = time.time() - tg
             dropped_fresh = collections.Counter()
             fresh, bad, zero_reward = {}, {}, set()
@@ -776,12 +805,18 @@ def main():
                 ref_s=round(time.time() - tr, 1), dropped=dict(dropped_fresh), **rollout_stats(qs),
                 per_q={q["id"]: [int(sum(q["correct"])), sum(em_correct(t, q["answer"]) for t in q["outputs"])] for q in qs}
                 if len(qs) <= 16 else None,
-                mixed=sum(0 < sum(q["correct"]) < len(q["correct"]) for q in qs))
-        if args.refresh_every:
+                mixed=sum(0 < sum(q["correct"]) < len(q["correct"]) for q in qs),
+                **(dict(filter_gens=gens, filter_mixed=sum(map(mixed_group, qs)), filter_all_right=sum(
+                    sum(map(right_rollout, q["correct"], q["format_ok"])) == len(q["correct"]) for q in qs))
+                   if args.filter_uniform_groups != "none" else {}))
+        if args.filter_uniform_groups != "none":  # the first --problems-per-step mixed groups, each once
+            keep = list(dict.fromkeys(q["id"] for q in qs if mixed_group(q) and q["id"] in fresh))
+            batch = [fresh[g] for g in keep[: args.problems_per_step]]
+        elif args.refresh_every:
             batch = [fresh[g] for g in order[: args.problems_per_step] if g in fresh]
         else:
             batch = [groups[g] for g in order[: args.problems_per_step]]
-        del order[: args.problems_per_step]
+        del order[: consume if args.filter_uniform_groups != "none" else args.problems_per_step]
         n_rows = sum(len(g) for g in batch)
         stats = collections.defaultdict(float)
         if args.answer_pg:  # bnpo: the answer-side term is divided by the step's answer tokens (good + malformed rollouts)
