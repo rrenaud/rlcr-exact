@@ -76,19 +76,20 @@ def parse(completion):
 _CALLER = None
 
 
-def score(spot, completion):
+def score(spot, completion, fmt=None):
     global _CALLER
     if _CALLER is None:
         from .betting import Score
         _CALLER = Score("caller")
+    fmt = fmt or spot.get("fmt", "claim")
     ok, ans, conf = parse(completion)
     c = conf if conf is not None and 0 <= conf <= 1 else 0.0  # RLCR: missing confidence = 0
     correct = float(ans == spot["answer"])
     p = spot["p_win"] if ans == "yes" else 1 - spot["p_win"]
     return dict(format_ok=ok, answer=ans, conf=conf, correct=correct, p_correct=p,
                 brier=(c - correct) ** 2, brier_expected=p * (1 - c) ** 2 + (1 - p) * c ** 2,
-                # caller score is about the equity statement, P(win) = c if answered yes else 1 - c
-                caller_expected=float(_CALLER.H(spot["p_win"]) + _CALLER.D(spot["p_win"], c if ans == "yes" else 1 - c)))
+                # caller score is about the equity statement: P(win) = c in the claim format (defined so), else c or 1 - c
+                caller_expected=float(_CALLER.H(spot["p_win"]) + _CALLER.D(spot["p_win"], c if fmt == "claim" or ans == "yes" else 1 - c)))
 
 
 class PokerEquityEnv:
@@ -104,4 +105,4 @@ class PokerEquityEnv:
         return spot
 
     def score(self, spot, completion):
-        return score(spot, completion)
+        return score(spot, completion, self.fmt)

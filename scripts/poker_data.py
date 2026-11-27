@@ -67,6 +67,8 @@ def main():
                                                        tokenize=False, add_generation_prompt=True)
                         r["prompt_ids"] = tok(text, add_special_tokens=False)["input_ids"]
                     f.write(json.dumps(r) + "\n"); kept += 1
+            if not rows:
+                continue
             p = np.array([r["p_win"] for r in rows]); o = np.array([r["outcome"] for r in rows])
             print(f"{split}: {kept} rows; mean p_win {p.mean():.3f}, win rate {(o > 0).mean():.3f}; "
                   f"p_win deciles {np.round(np.quantile(p, np.linspace(0, 1, 11)), 2).tolist()}", file=sys.stderr)
