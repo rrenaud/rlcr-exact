@@ -9,8 +9,9 @@
 - **Online (Stage B, B2, seed 202):** equal to rlcr11 (0.160 vs 0.158 @600) only because training drops the half
   steps. Their share of q goes from 0.56 to 0 between steps 6 and 11, in the overconfident start, and there is no
   support floor to bring them back. B2r1 / B2r2 were cancelled: they would only re-confirm the collapse.
-- **Why the grid cannot matter much:** the Brier decomposition below. Dev Brier ≈ 0.16 is UNC 0.249 minus
-  discrimination (RES 0.08-0.10) plus a miscalibration term only 0.001-0.006 above its 500-row noise floor.
+- **Why the grid cannot matter much:** the Brier decomposition below. Dev Brier ≈ 0.16 is UNC (uncertainty) 0.249 minus
+  RES (resolution, i.e. discrimination) 0.08-0.10 plus REL (reliability, i.e. miscalibration), which is only
+  0.001-0.006 above its 500-row noise floor.
   Cross-validated isotonic recalibration, the best any reshaping of the stated confidences can do without changing
   their ranking, moves Brier by -0.006 to +0.003. The seed-to-seed spread (~0.015) is discrimination, not calibration.
   A finer grid, smoother or regression-like gradients for q (a log-concavity penalty was considered), or an ordinal
@@ -36,6 +37,14 @@ rlcr21 run's high RES and recalibrated 0.154 come from one seed at one checkpoin
 Worked example with charts, free-throw analogy and every Stage A/B/C pick:
 **https://rrenaud.github.io/rlcr-exact/brier/** (source `docs/brier_site/`, data from `scripts/brier_site_data.py`).
 
+The three terms are Murphy's (1973) partition of the Brier score, with his names:
+- **UNC = uncertainty.** How hard the task is to forecast with no information at all.
+- **RES = resolution.** How much the forecast separates rows that turn out right from rows that turn out wrong. Higher
+  is better. In ML terms, discrimination.
+- **REL = reliability.** How far the stated numbers are from the hit rates they should equal. Lower is better: the
+  name is historical (a "reliable" forecaster has REL = 0), and in ML terms it is miscalibration. It is the squared
+  version of the reliability diagram's distance from the diagonal; ECE is its absolute-value cousin.
+
 Group dev rows by stated confidence v (n_v rows, hit rate ȳ_v; overall hit rate ȳ). Then, exactly:
 
     Brier = UNC − RES + REL
@@ -43,7 +52,49 @@ Group dev rows by stated confidence v (n_v rows, hit rate ȳ_v; overall hit rate
     RES = Σ n_v/N (ȳ_v − ȳ)²         between-group variance of the outcome = the part of UNC the confidence explains
     REL = Σ n_v/N (v − ȳ_v)²         squared gap between each stated value and its group's hit rate
 
-It is an analysis of variance of y: UNC is the total, RES is the between-groups share, and UNC − RES is the residual
+**Toy examples.** 100 questions, 50 answered correctly, so UNC = 0.5 × 0.5 = 0.25 for every forecaster below.
+
+| forecaster | what it says | groups (stated v: right / rows) | RES | REL | Brier = UNC − RES + REL |
+|---|---|---|---|---|---|
+| coin flip | 0.5 on everything | 0.5: 50/100 | 0 | 0 | 0.25 |
+| overconfident, knows nothing | 0.95 on everything | 0.95: 50/100 | 0 | (0.95−0.5)² = 0.2025 | 0.4525 |
+| knows something, calibrated | 0.8 or 0.2 | 0.8: 40/50; 0.2: 10/50 | ½(0.3²) + ½(0.3²) = 0.09 | 0 | 0.16 |
+| knows the same, overstates it | 1.0 or 0.0 (same split) | 1.0: 40/50; 0.0: 10/50 | 0.09 | ½(0.2²) + ½(0.2²) = 0.04 | 0.20 |
+| knows more, calibrated | 0.9 or 0.1 | 0.9: 45/50; 0.1: 5/50 | ½(0.4²) + ½(0.4²) = 0.16 | 0 | 0.09 |
+
+Rows 3 → 4 are a calibration change: same groups, so same RES; only the labels moved. Mapping 1.0 → 0.8 and
+0.0 → 0.2 (what isotonic recalibration learns) recovers 0.16. Rows 3 → 5 are a discrimination change: the groups
+themselves are cleaner, which no relabelling can produce. Row 2 is RLVR, and row 3 is about where our trained runs
+are (Brier ≈ 0.16, RES ≈ 0.09).
+
+**The same breakdown on two real dev runs** (500 questions). Each level contributes n_v/N (v − ȳ_v)² to REL and
+n_v/N (ȳ_v − ȳ)² to RES.
+
+A2 exact rlcr11 s102 @1000 (ȳ = 0.528): Brier 0.1534 = UNC 0.2492 − RES 0.1002 + REL 0.0044 (noise floor 0.0033).
+
+| stated v | rows | right | hit rate ȳ_v | REL part | RES part |
+|---|---|---|---|---|---|
+| 0.0 | 13 | 1 | 0.08 | 0.0002 | 0.0053 |
+| 0.1 | 53 | 4 | 0.08 | 0.0001 | 0.0217 |
+| 0.2 | 33 | 3 | 0.09 | 0.0008 | 0.0126 |
+| 0.3 | 61 | 15 | 0.25 | 0.0004 | 0.0097 |
+| 0.4 | 26 | 5 | 0.19 | 0.0022 | 0.0059 |
+| 0.5 | 25 | 10 | 0.40 | 0.0005 | 0.0008 |
+| 0.6 | 30 | 16 | 0.53 | 0.0003 | 0.0000 |
+| 0.7 | 44 | 30 | 0.68 | 0.0000 | 0.0021 |
+| 0.8 | 141 | 113 | 0.80 | 0.0000 | 0.0211 |
+| 0.9 | 74 | 67 | 0.91 | 0.0000 | 0.0211 |
+
+REL is 0.0044 against a 0.0033 floor. The largest single part is 0.4 (5 of 26 right), a small group. The big groups
+at 0.8 and 0.9 match their stated values almost exactly. RES comes from the
+ends, where many rows say 0.1 (8% right) or 0.8-0.9 (80-91% right).
+
+RLVR, before any confidence training (ȳ = 0.438): Brier 0.5127 = UNC 0.2462 − RES 0.0043 + REL 0.2708. It says 0.95
+or 1.0 on 435 of 500 rows, and those rows are right 44% and 46% of the time. Those two levels alone contribute
+0.109 + 0.129 = 0.238 of REL. Their hit rates are both ≈ ȳ, so they add no RES. This is the toy's
+"overconfident, knows nothing" row.
+
+In general, it is an analysis of variance of y: UNC is the total, RES is the between-groups share, and UNC − RES is the residual
 that nothing about the stated confidence can remove. REL is separate: the penalty for writing the wrong number on
 a group. Calibration work (a finer grid, smoothing q, an ordinal loss, post-hoc recalibration) can only shrink REL.
 Discrimination work (new information about whether this answer is right) is the only way to grow RES. Two
