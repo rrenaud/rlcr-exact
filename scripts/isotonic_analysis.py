@@ -133,7 +133,10 @@ def load_runs(root, stages):
                 continue
             ev = collections.defaultdict(dict)
             for f in glob.glob(os.path.join(d, "prereg_eval", "*_step*.json")):
-                split, step = re.match(r"(dev|test)_step(\d+)\.json$", os.path.basename(f)).groups()
+                mt = re.match(r"(dev|test)_step(\d+)\.json$", os.path.basename(f))
+                if not mt:  # e.g. dev2_stepN.json (Stage B amendment split)
+                    continue
+                split, step = mt.groups()
                 ev[int(step)][split] = json.load(open(f))
             both = sorted(s for s in ev if all(os.path.exists(os.path.join(d, "prereg_eval", f"{sp}_step{s}.jsonl.gz"))
                                                for sp in ("dev", "test")))
