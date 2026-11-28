@@ -1,0 +1,23 @@
+{
+ "em": 0.518,
+ "format_ok": 1.0,
+ "truncated": 0.0,
+ "accuracy": 0.518,
+ "mean_tokens": 252.39,
+ "answer_changed": 0.324,
+ "right_to_wrong": 0.046,
+ "wrong_to_right": 0.134,
+ "conf_parsed": 1.0,
+ "mean_conf": 0.5626,
+ "questions": 500,
+ "brier_parsed": 0.1873,
+ "auroc_parsed": 0.7871,
+ "brier": 0.18730000000000002,
+ "auroc": 0.7871161024687996,
+ "ece": 0.05220000000000006,
+ "mean_conf_all": 0.5626,
+ "split": "dev",
+ "tag": "step450",
+ "model": "mehuldamani/hotpot-v2-brier-7b-no-split",
+ "adapter": "/data/gpuq-runs/rrenaud/rlcr-prereg-C/run-20261120T170849Z-00d95c574b/checkpoints/rlcr11_sampled_lr0.00024_W0.0054_s300_tq_pg1sam_bRLCR/step450"
+}

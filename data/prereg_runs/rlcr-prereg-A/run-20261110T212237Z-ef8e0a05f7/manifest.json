@@ -1,0 +1,15 @@
+{
+ "run_id": "run-20261110T212237Z-ef8e0a05f7",
+ "experiment_id": "rlcr-prereg-A",
+ "description": "prereg@5d40391 A3r2 sampled",
+ "command": [
+  "/bin/bash",
+  "scripts/prereg_run.sh",
+  "A3r2",
+  "sampled"
+ ],
+ "started_at": "2026-11-12T05:51:42+00:00",
+ "ended_at": "2026-11-12T07:40:50+00:00",
+ "exit_code": 0,
+ "git_revision_at_start": "5d40391cc8da00ff92a549c4a898d1b9901c2d3a"
+}

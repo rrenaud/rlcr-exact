@@ -1,0 +1,14 @@
+{
+ "run_id": "run-20261127T122515Z-ea03f5e97a",
+ "experiment_id": "rlcr-prereg-ref",
+ "description": "prereg@539cb55 reference panel dev2",
+ "command": [
+  "/bin/bash",
+  "scripts/prereg_refs.sh",
+  "dev2"
+ ],
+ "started_at": "2026-11-27T13:45:07+00:00",
+ "ended_at": "2026-11-27T14:04:04+00:00",
+ "exit_code": 0,
+ "git_revision_at_start": "539cb55322234f81422e3d098876c7ee6ff7ef12"
+}

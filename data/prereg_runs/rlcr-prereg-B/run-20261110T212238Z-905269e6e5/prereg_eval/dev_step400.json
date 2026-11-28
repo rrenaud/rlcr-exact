@@ -1,0 +1,23 @@
+{
+ "em": 0.542,
+ "format_ok": 0.996,
+ "truncated": 0.004,
+ "accuracy": 0.542,
+ "mean_tokens": 191.116,
+ "answer_changed": 0.172,
+ "right_to_wrong": 0.01,
+ "wrong_to_right": 0.122,
+ "conf_parsed": 0.996,
+ "mean_conf": 0.5026,
+ "questions": 500,
+ "brier_parsed": 0.1786,
+ "auroc_parsed": 0.8087,
+ "brier": 0.17786000000000002,
+ "auroc": 0.8103417715399862,
+ "ece": 0.06699999999999996,
+ "mean_conf_all": 0.5006,
+ "split": "dev",
+ "tag": "step400",
+ "model": "mehuldamani/hotpot-v2-correctness-7b",
+ "adapter": "/data/gpuq-runs/rrenaud/rlcr-prereg-B/run-20261110T212238Z-905269e6e5/checkpoints/rlcr11_exact_lr0.00024_W0.0054_s1202_tq_pg1exa_bRLCR/step400"
+}

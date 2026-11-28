@@ -1,0 +1,23 @@
+{
+ "em": 0.306,
+ "format_ok": 0.94,
+ "truncated": 0.014,
+ "accuracy": 0.288,
+ "mean_tokens": 176.686,
+ "answer_changed": 0.656,
+ "right_to_wrong": 0.216,
+ "wrong_to_right": 0.082,
+ "conf_parsed": 0.986,
+ "mean_conf": 0.8189,
+ "questions": 500,
+ "brier_parsed": 0.4881,
+ "auroc_parsed": 0.6711,
+ "brier": 0.48129000000000005,
+ "auroc": 0.6775514981273407,
+ "ece": 0.5194000000000001,
+ "mean_conf_all": 0.8074000000000001,
+ "split": "dev2",
+ "tag": "Qwen2.5-7B_regen1",
+ "model": "Qwen/Qwen2.5-7B",
+ "adapter": null
+}

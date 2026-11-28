@@ -1,0 +1,23 @@
+{
+ "em": 0.542,
+ "format_ok": 0.756,
+ "truncated": 0.018,
+ "accuracy": 0.436,
+ "mean_tokens": 195.5,
+ "answer_changed": 0.07,
+ "right_to_wrong": 0.022,
+ "wrong_to_right": 0.036,
+ "conf_parsed": 0.998,
+ "mean_conf": 0.9622,
+ "questions": 500,
+ "brier_parsed": 0.516,
+ "auroc_parsed": 0.5859,
+ "brier": 0.5149549999999999,
+ "auroc": 0.5873430281735963,
+ "ece": 0.5242999999999999,
+ "mean_conf_all": 0.9602999999999999,
+ "split": "dev2",
+ "tag": "hotpot-v2-correctness-7b_regen2",
+ "model": "mehuldamani/hotpot-v2-correctness-7b",
+ "adapter": null
+}

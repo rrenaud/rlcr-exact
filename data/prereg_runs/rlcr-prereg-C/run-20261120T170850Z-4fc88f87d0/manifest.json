@@ -1,0 +1,15 @@
+{
+ "run_id": "run-20261120T170850Z-4fc88f87d0",
+ "experiment_id": "rlcr-prereg-C",
+ "description": "prereg@247f8ca C3 exact",
+ "command": [
+  "/bin/bash",
+  "scripts/prereg_run.sh",
+  "C3",
+  "exact"
+ ],
+ "started_at": "2026-11-23T08:41:10+00:00",
+ "ended_at": "2026-11-23T10:41:15+00:00",
+ "exit_code": 0,
+ "git_revision_at_start": "247f8caecc898a33bc0cec2a3213d562421b26b5"
+}

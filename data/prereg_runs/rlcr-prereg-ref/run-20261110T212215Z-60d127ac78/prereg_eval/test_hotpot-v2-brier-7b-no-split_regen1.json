@@ -1,0 +1,23 @@
+{
+ "em": 0.43,
+ "format_ok": 0.998,
+ "truncated": 0.002,
+ "accuracy": 0.43,
+ "mean_tokens": 255.44,
+ "answer_changed": 0.336,
+ "right_to_wrong": 0.048,
+ "wrong_to_right": 0.128,
+ "conf_parsed": 0.998,
+ "mean_conf": 0.5146,
+ "questions": 500,
+ "brier_parsed": 0.1914,
+ "auroc_parsed": 0.7914,
+ "brier": 0.19100999999999999,
+ "auroc": 0.7921583027335782,
+ "ece": 0.0836,
+ "mean_conf_all": 0.5136,
+ "split": "test",
+ "tag": "hotpot-v2-brier-7b-no-split_regen1",
+ "model": "mehuldamani/hotpot-v2-brier-7b-no-split",
+ "adapter": null
+}
