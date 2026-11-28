@@ -7,6 +7,9 @@ cd "$(dirname "$0")/.."
 PY=${PY:-/home/rrenaud/envs/pytorch/bin/python}
 $PY scripts/export_rollouts.py "$@"
 du -ah results/rollouts | sort -h
+mb=$(du -sm --apparent-size results/rollouts | cut -f1)
+budget=$(python3 -c "import json; print(json.load(open('results/rollouts/budget.json'))['budget_mb'])")
+python3 -c "import sys; sys.exit($mb > $budget)" || { echo "results/rollouts is ${mb} MB, over the ${budget} MB budget (CLAUDE.md); not pushing"; exit 1; }
 big=$(find results/rollouts -type f -size +95M)
 [ -z "$big" ] || { echo "over GitHub's 100 MB file limit, not pushing: $big"; exit 1; }
 git add results/rollouts

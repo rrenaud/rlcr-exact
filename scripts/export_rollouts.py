@@ -83,6 +83,9 @@ def main():
                 continue
             files = sorted(glob.glob(os.path.join(d, "prereg_eval", "*.jsonl.gz")))
             meta["n_eval_files"] = len(files)
+            cs = [json.loads(l).get("compute_s", 0) for f in glob.glob(os.path.join(d, "train_*.jsonl")) for l in open(f)
+                  if '"checkpoint"' in l]
+            meta["gpu_h"] = round(max(cs, default=0) / 3600, 3)  # training compute only: a lower bound on GPU time
             runs.append(meta)
             for f in files:
                 split, tag = re.match(r"(dev|test)_(.+)\.jsonl\.gz$", os.path.basename(f)).groups()
@@ -123,6 +126,9 @@ def main():
         with gzip.GzipFile(os.path.join(args.out, f"questions_{split}.jsonl.gz"), "wb", mtime=0) as f:
             f.write("".join(json.dumps(dict(id=q["id"], answer=q["answer"], source=q.get("source"))) + "\n"
                             for q in qs).encode())
+    gpu_h = float(rs["gpu_h"].sum())
+    json.dump(dict(gpu_h=round(gpu_h, 2), budget_mb=round(gpu_h, 2)), open(os.path.join(args.out, "budget.json"), "w"))
+    print(f"GPU-hours (training compute): {gpu_h:.1f} -> publish budget {gpu_h:.1f} MB (CLAUDE.md: 1 MB per GPU-hour)")
     print("runs by stage/arm:\n" + rs.groupby(["stage", "arm"], dropna=False).size().to_string())
 
 
